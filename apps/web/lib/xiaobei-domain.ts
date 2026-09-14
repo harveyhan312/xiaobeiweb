@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { safeUrl } from "./safe-url";
 
 const STATE_DIR = process.env.OPENCLAW_STATE_DIR ?? join(homedir(), ".openclaw");
 const MAIN_WS = join(STATE_DIR, "workspace-main");
@@ -76,6 +77,21 @@ function openDomainDb(dbPath: string): DatabaseSync | null {
   }
 }
 
+// 域库可能只建了部分表（跨版本演进）——按表探测、逐表容错，单表缺失不连带丢另一表数据
+function queryTable(
+  db: DatabaseSync,
+  table: string,
+  sql: string,
+): Array<Record<string, unknown>> {
+  const hit = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?").get(table);
+  if (hit === undefined) return [];
+  try {
+    return db.prepare(sql).all() as Array<Record<string, unknown>>;
+  } catch {
+    return [];
+  }
+}
+
 // ── 发布记录（workspace-main/db/published_track.db，每平台一张 pub_<platform> 表）──
 
 export type PublishedRow = {
@@ -136,7 +152,7 @@ export function getPublishedRows(limit = 200): PublishedRow[] {
           contentType: (r.content_type as string) ?? null,
           publishDate: String(r.publish_date ?? ""),
           distributeStatus: Number(r.distribute_status ?? 0),
-          publishUrl: (r.publish_url as string) ?? null,
+          publishUrl: safeUrl(r.publish_url as string | null),
           dnaId: (r.dna_id as string) ?? null,
           account: (r.account as string) ?? null,
           metrics,
@@ -245,7 +261,7 @@ export type LeadCreator = {
   platform: string;
   creatorId: string;
   nickname: string | null;
-  homepageUrl: string;
+  homepageUrl: string | null;
   qualified: boolean;
   notes: string | null;
   createdAt: string;
@@ -255,7 +271,7 @@ export type CommentPost = {
   id: number;
   platform: string;
   postTitle: string | null;
-  postUrl: string;
+  postUrl: string | null;
   strategy: string;
   replied: boolean;
   replyContent: string | null;
@@ -268,29 +284,29 @@ export function getBdData(): BdData {
   const db = openDomainDb(join(MAIN_WS, "db", "bd_record.db"));
   if (!db) return { leads: [], comments: [] };
   try {
-    const leads = (
-      db.prepare("SELECT * FROM lead_creators ORDER BY created_at DESC LIMIT 200").all() as Array<
-        Record<string, unknown>
-      >
+    const leads = queryTable(
+      db,
+      "lead_creators",
+      "SELECT * FROM lead_creators ORDER BY created_at DESC LIMIT 200",
     ).map((r) => ({
       id: Number(r.id ?? 0),
       platform: String(r.platform ?? ""),
       creatorId: String(r.creator_id ?? ""),
       nickname: (r.nickname as string) ?? null,
-      homepageUrl: String(r.homepage_url ?? ""),
+      homepageUrl: safeUrl(r.homepage_url as string | null),
       qualified: Number(r.qualified ?? 0) === 1,
       notes: (r.notes as string) ?? null,
       createdAt: String(r.created_at ?? ""),
     }));
-    const comments = (
-      db.prepare("SELECT * FROM comment_posts ORDER BY created_at DESC LIMIT 200").all() as Array<
-        Record<string, unknown>
-      >
+    const comments = queryTable(
+      db,
+      "comment_posts",
+      "SELECT * FROM comment_posts ORDER BY created_at DESC LIMIT 200",
     ).map((r) => ({
       id: Number(r.id ?? 0),
       platform: String(r.platform ?? ""),
       postTitle: (r.post_title as string) ?? null,
-      postUrl: String(r.post_url ?? ""),
+      postUrl: safeUrl(r.post_url as string | null),
       strategy: String(r.strategy ?? ""),
       replied: Number(r.replied ?? 0) === 1,
       replyContent: (r.reply_content as string) ?? null,
@@ -369,10 +385,10 @@ export function getIrData(): IrData {
   const db = openDomainDb(join(MAIN_WS, "db", "ir_record.db"));
   if (!db) return { investors: [], applications: [] };
   try {
-    const investors = (
-      db.prepare("SELECT * FROM investors ORDER BY updated_at DESC LIMIT 200").all() as Array<
-        Record<string, unknown>
-      >
+    const investors = queryTable(
+      db,
+      "investors",
+      "SELECT * FROM investors ORDER BY updated_at DESC LIMIT 200",
     ).map((r) => ({
       id: Number(r.id ?? 0),
       name: String(r.name ?? ""),
@@ -383,10 +399,10 @@ export function getIrData(): IrData {
       matchScore: (r.match_score as string) ?? null,
       updatedAt: String(r.updated_at ?? ""),
     }));
-    const applications = (
-      db
-        .prepare("SELECT * FROM applications ORDER BY deadline IS NULL, deadline ASC LIMIT 100")
-        .all() as Array<Record<string, unknown>>
+    const applications = queryTable(
+      db,
+      "applications",
+      "SELECT * FROM applications ORDER BY deadline IS NULL, deadline ASC LIMIT 100",
     ).map((r) => ({
       id: Number(r.id ?? 0),
       name: String(r.name ?? ""),
@@ -428,22 +444,20 @@ export function getCustomerData(): CustomerData {
   const db = openDomainDb(join(SALES_WS, "db", "customer.db"));
   if (!db) return { records: [], followUps: [] };
   try {
-    const records = (
-      db.prepare("SELECT * FROM cs_record ORDER BY updated_at DESC LIMIT 500").all() as Array<
-        Record<string, unknown>
-      >
+    const records = queryTable(
+      db,
+      "cs_record",
+      "SELECT * FROM cs_record ORDER BY updated_at DESC LIMIT 500",
     ).map((r) => ({
       peer: String(r.peer ?? ""),
       businessStatus: String(r.business_status ?? "free"),
       purpose: String(r.purpose ?? ""),
       updatedAt: (r.updated_at as string) ?? null,
     }));
-    const followUps = (
-      db
-        .prepare(
-          "SELECT * FROM follow_up WHERE status != 'completed' ORDER BY follow_up_at ASC LIMIT 100",
-        )
-        .all() as Array<Record<string, unknown>>
+    const followUps = queryTable(
+      db,
+      "follow_up",
+      "SELECT * FROM follow_up WHERE status != 'completed' ORDER BY follow_up_at ASC LIMIT 100",
     ).map((r) => ({
       id: Number(r.id ?? 0),
       peer: String(r.peer ?? ""),
@@ -507,6 +521,7 @@ export const VIDEO_MILESTONE_LABELS: Array<[keyof VideoMilestones, string]> = [
   ["storyboard", "分镜"],
   ["characters", "角色"],
   ["gateA", "闸门A"],
+  ["gateB", "闸门B"],
   ["slots", "素材槽"],
   ["render", "生成"],
   ["audio", "配音"],

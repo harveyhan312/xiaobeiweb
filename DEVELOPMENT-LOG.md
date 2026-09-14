@@ -180,3 +180,17 @@ xiaobei 是开源的自媒体获客 AI agent 产品（TeamWiseFlow/xiaobei，本
 ## Phase 2 完成声明
 
 计划文档 §7 Phase 2 验收项达成：业务 6 页只读 dashboard ✅（发布记录/内容 DNA/复盘校准/BD·IR/客户库/视频生产）、引擎 5 页（Phase 1）✅、聊天直连 ✅、夹具 + 真实数据双重验证 ✅、隔离红线全程无违例 ✅。
+
+---
+
+## 2026-09-14 · Phase 2 复核修复（审核员 F11–F14）
+
+审核员 Phase 2 复核结论：红线全绿、可继续推进；4 条发现（F11–F14，均低/信息级）。处置如下（tsc/eslint 双零）。
+
+**T10 · 复核修复** ✅（2026-09-14）
+
+- **F11 gateB 里程碑不渲染**：`VIDEO_MILESTONE_LABELS` 在 gateA 后补 `["gateB", "闸门B"]`（13 项齐）；顺带把 `/videos` 空态文案的硬编码阶段数改为动态 `VIDEO_MILESTONE_LABELS.length`（同源防漂移）
+- **F12 多表查询容错粒度**：新增 `queryTable()`——先查 `sqlite_master` 探测表存在（参数化查询）再取数、逐表 try/catch；`getBdData`/`getIrData`/`getCustomerData` 六处双表查询全部改走该入口，单表缺失不再连带丢另一表数据
+- **F13 外链协议白名单**：新增 `lib/safeUrl()`（仅放行 `^https?:`，trim 后判定）；接线在**数据层出口**而非逐个 href——`publishUrl`/`homepageUrl`/`postUrl` 进类型前即过滤，非法值置 null，对应 `LeadCreator.homepageUrl`/`CommentPost.postUrl` 类型收紧为 `string | null`，bd-ir 页两处 `<a>` 改条件渲染（publish 页原本就按 null 条件渲染，零改动）
+- **F14 路径守卫不解析 symlink**：按审核意见**不修，记录在案**——当前威胁模型安全（workspace 由 agent 控制、web 零写入、入参正则校验）；未来 workspace 接受外部输入时改 `realpath` 校验
+- **验证**：tsc 0 error、eslint 0/0；/tmp 部分表夹具（只有 lead_creators 无 comment_posts）经 node 实测——lead 数据保留、缺表返回空数组不崩溃；safeUrl 7 组用例全过（https 放行含 trim、javascript:/data:/相对路径/空/null 均置 null）；:3000 八页全 200，`/videos` 空态动态显示 13 阶段

@@ -15,8 +15,8 @@ export default function VideosPage() {
 
       {projects.length === 0 ? (
         <p className="text-sm text-neutral-500">
-          暂无视频生产任务——content-producer 产出视频工程目录后（brief.md 起步），本页展示 15
-          阶段进度。
+          暂无视频生产任务——content-producer 产出视频工程目录后（brief.md 起步），本页展示{" "}
+          {VIDEO_MILESTONE_LABELS.length} 阶段进度。
         </p>
       ) : (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">

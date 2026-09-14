@@ -67,14 +67,16 @@ export default function BdIrPage() {
                   </span>
                 )}
                 {l.notes && <span className="text-xs text-neutral-500">{l.notes}</span>}
-                <a
-                  href={l.homepageUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="ml-auto text-xs text-blue-600 hover:underline dark:text-blue-400"
-                >
-                  主页
-                </a>
+                {l.homepageUrl && (
+                  <a
+                    href={l.homepageUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="ml-auto text-xs text-blue-600 hover:underline dark:text-blue-400"
+                  >
+                    主页
+                  </a>
+                )}
                 <span className="text-xs text-neutral-400">{l.createdAt}</span>
               </div>
             ))}
@@ -116,14 +118,16 @@ export default function BdIrPage() {
                     回复：{c.replyContent}
                   </p>
                 )}
-                <a
-                  href={c.postUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mt-1 inline-block text-xs text-blue-600 hover:underline dark:text-blue-400"
-                >
-                  原帖
-                </a>
+                {c.postUrl && (
+                  <a
+                    href={c.postUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-1 inline-block text-xs text-blue-600 hover:underline dark:text-blue-400"
+                  >
+                    原帖
+                  </a>
+                )}
               </div>
             ))}
           </div>
