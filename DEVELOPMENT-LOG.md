@@ -135,3 +135,48 @@ xiaobei 是开源的自媒体获客 AI agent 产品（TeamWiseFlow/xiaobei，本
 - **F1 [中] BFF 无鉴权**：`/api/chat/*` 本机任意进程可调用。当前 dev server 只 bind localhost、单租户私有部署，风险可控；**Phase 3 配置写操作上线前必须补最小鉴权**（本地 token / loopback 校验 / 单用户口令，任选其一）
 - **F8 [低] chat.history 无分页**：仅支持 limit≤1000，协议的 `hasMore`/`nextOffset` 未消费；单会话消息量临近 1000 时补 offset + "加载更多"
 - **F9/F10 [信息]**：错误 message 原样回显、SSE 原样转发 payload——私有部署可接受，多租户化前统一错误出口 + payload 白名单
+
+---
+
+## 2026-09-14 · Phase 2（域 dashboard：业务数据只读视图）
+
+**T7 · 域 schema 掘取 + `lib/xiaobei-domain.ts` 数据层** ✅（2026-09-14）
+
+- **schema 来源（~/xiaobei/ 只读掘取）**：published-track `init-db.sh`（pub 表通用列 + distribute_status 语义 0/1/2）、expert-bd bd-record/info-record `init-db.sh`、expert-ir ir-record `init-db.sh`（状态机 new→contacted→bp_sent→meeting→dd→ts→invested/passed + contacts/applications）、sales-cs `db/schema.sql`（cs_record + follow_up，由 system hook 写入，web 永不写）、published-track SKILL.md（wx_channel 标题特殊处理、upsert 语义）、wx-mp 视频产线 SKILL.md（13 个里程碑 → 产物文件存在性推断）
+- **新增 `apps/web/lib/xiaobei-domain.ts`**（~300 行，全部只读）：
+  - `getDomainPlatforms()`：readdir workspace-main ∩ 16 平台白名单，hasDna/hasCalibration/hasOutputs 三布尔
+  - `readWorkspaceTextFile(...parts)`：resolve 后强制前缀 `resolve(MAIN_WS)+sep`，**路径穿越守卫**（`..`/绝对路径注入无效）
+  - `openDomainDb()`：existsSync 检查 + `readOnly:true`；**库文件不存在返回 null**（本机域库尚未创建，页面空态正确）
+  - `getPublishedRows()`：sqlite_master 枚举 `pub_%` 表（正则 `/^pub_[a-z0-9_]+$/` 防注入），`SELECT *` 按发布日期倒序，互动指标 = 行数据减通用列后的数值列（**每平台指标列不同**，逐行动态拆分）
+  - `getDnaIndex()`/`getCalibrations()`/`getBdData()`/`getIntelItems()`/`getIrData()`/`getCustomerData()`：对应库/目录只读聚合
+  - `getVideoProjects()`：双来源扫描（content-producer/output_videos + wx_mp/outputs），13 里程碑映射为产物文件存在性；平台输出目录需命中 brief/artifacts/cover/finalDeliver 任一标记才纳入（草稿目录自动排除）
+  - `OPENCLAW_STATE_DIR` 环境变量覆盖根路径——测试夹具可指向 /tmp，**不触碰 `~/.openclaw`**
+- `lib/xiaobei-data.ts` 保持引擎域（Phase 1），域数据独立新文件，互不掺杂
+
+**T8 · 6 个业务 dashboard 页 + 分组导航 + markdown 渲染** ✅（2026-09-14）
+
+- **新增依赖**：`react-markdown@10.1.0` + `remark-gfm@4.0.1`（npmmirror，DNA 文档/复盘校准 md 渲染）
+- **页面**（`app/(console)/`）：`publish`（发布记录总表：平台/标题/类型/日期/分发徽章/互动指标/DNA/账号/链接）、`dna` + `dna/[platform]/[dnaId]`（DNA 卡片索引 + 文档详情，segment id 正则守卫，notFound 兜底）、`calibration`（平台状态机 + 可折叠 md 文档）、`bd-ir`（5 区块：达人库/评论触达/情报库/投资人表/申请清单，7 天截止红色高亮）、`customers`（客户状态 + 跟进卡片）、`videos`（项目卡 + 里程碑清单 ✓/未完成删除线）
+- **导航重构**：layout 分三组（业务 6 项 / 引擎 5 项 / 聊天），分组间分隔符
+- **markdown 组件**：`(console)/_components/markdown.tsx`，ReactMarkdown + remarkGfm，arbitrary-variant 排版样式（h2/table/code 均衡），无外部 CSS
+- **空态优先设计**：本机域库均未创建（从未发布过内容），6 页全部空态可用 + 文案说明"数据来源与写入方"，首批真实数据出现时零改动生效
+
+**T9 · 验证 + 日志 + 提交** ✅（2026-09-14）
+
+- **静态检查**：`tsc --noEmit` 0 error、`eslint .` 0 error/0 warning
+- **夹具验证（不触碰 `~/.openclaw`）**：`/tmp/xb-fixture` 按真实 `init-db.sh` schema 1:1 建库（pub_wx_mp + pub_xhs 3 行真实感数据 + 视频目录两真一假），`node run-check.ts` 直接 import 真实 lib 断言通过——getPublishedRows 每平台指标拆分/日期倒序/分发标签、getVideoProjects 里程碑推断 + 草稿目录排除、缺库 null 容错
+- **临时 dev server 视觉验证**：`OPENCLAW_STATE_DIR=/tmp/xb-fixture pnpm dev -p 3002`（:3001 被无关进程占用未动）——`/publish` 夹具数据渲染正确（分发徽章 已分发/无需分发/待分发、per-platform 指标、DNA/账号/链接列），`/videos` 两卡片里程碑推断正确（topic-a：简报/脚本/闸门A ✓；my-video：简报/片段 ✓；draft-article 未误入）。验证后进程已停、/tmp 夹具已删
+- **真实数据视觉验证（:3000）**：`/dna` 2 张 DNA 卡（wx_mp + xhs）、`/dna/wx_mp/dna-0` markdown 全文渲染正常、`/calibration` 4 平台卡片（schema v + 可折叠文档）、`/publish` `/bd-ir` `/customers` `/videos` 空态 HTTP 200 文案正确
+- **聊天回归**：react-markdown 安装后真实对话一轮（"ping，web 控制台回归测试"→ 流式回复"ok"），全链路无回归
+- **隔离终检**：全程 `~/.openclaw` 零写入（域库/文件全部只读打开；夹具验证走 OPENCLAW_STATE_DIR=/tmp）；gateway 18789 未受影响；临时 dev server 用 :3002 且已停
+- **git**：本次 Phase 2 变更随首个 commit 入库（见下方提交记录）
+
+**Phase 2 已知限制**：
+
+- 域库本机尚未创建——`getPublishedRows` 等的聚合口径（如每平台指标列名）基于 init-db.sh schema 推导，首批真实数据落库后需实际核对一次列名拼写
+- follow_up `next_action_at` 截止高亮仅显示日期，无倒计时；BD/IR 数据当前为空，真实数据出现后需复核渲染密度
+- `/bd-ir`、`/customers` 页脚已注明"web 只读，写入走 agent"——与 published-track/sales-cs hook 写入方约束一致
+
+## Phase 2 完成声明
+
+计划文档 §7 Phase 2 验收项达成：业务 6 页只读 dashboard ✅（发布记录/内容 DNA/复盘校准/BD·IR/客户库/视频生产）、引擎 5 页（Phase 1）✅、聊天直连 ✅、夹具 + 真实数据双重验证 ✅、隔离红线全程无违例 ✅。
