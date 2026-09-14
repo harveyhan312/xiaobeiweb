@@ -404,3 +404,42 @@ sandbox = `/tmp/xb-p3d-sandbox/openclaw.json`（真实配置拷贝后剥离：bi
 - crew 启停后 agent 的心跳/会话在 gateway 重启周期内生效（gateway 自动处理），web 不做二次重启确认
 - sample 内容按产品约定信任（与 IT engineer 手工并入同一信任级别），gateway schema 校验兜底非法键
 - sandbox 里 content-producer/sample 等测试夹具随 /tmp 清理消失；真实环境启用 sales-cs 的动作未经真实 gateway 演练（零写入约定）
+
+## 2026-09-14 · Phase 3 P3-F：全量验证 + :3000 事故修复
+
+**事故与根因（:3000 全 500）**：P3-F 回归开始时 ：3000 所有页面与 API 一律 500（含本应 401 的无令牌请求）。被停掉的 dev server 日志尾部留有直接证据：`ENOENT …/.next/server/app/page/app-build-manifest.json` 与 `ENOENT …/.next/static/development/_buildManifest.js.tmp.*`。根因：与 dev server 并发执行 `npx next build`（同 `.next` 目录），生产构建覆写 dev 增量产物，dev server 全路由崩。**处置**：原样重启 dev server（`pnpm dev`，环境仅靠 `.env.local` 自动加载 + BFF 服务端从 `~/.openclaw/openclaw.json` 解析 gateway token 的回退路径——重启即验证了该回退）。**预防**：dev server 运行期间不得对同一 distDir 跑 `next build`；构建前先停 dev 或使用独立 distDir。
+
+**验证证据**：
+
+| 用例 | 结果 |
+|------|------|
+| `next build`（生产构建，无并发 dev） | exit 0，全路由表输出（/ /config /cron /calibration /bd-ir /customers /publish /dna 等 27 条）✅ |
+| `tsc --noEmit` | exit 0 ✅ |
+| 页面无令牌（/ /config /publish /bd-ir /customers） | 200（鉴权在 API 层，页面为壳，符合 P3-A 设计）✅ |
+| 写 API 无令牌 ×8（channel/apply、crews/toggle、provider、agent-model、cron/action、domain/publish/distribute-status、gateway/restart、domain/ir/status） | 全部 401 ✅ |
+| 读 API 无令牌（config/gateway、cron、config/crews） | 全部 401 ✅（domain/ir/status GET → 405，方法不符） |
+| 带令牌 GET /api/config/gateway（真实 gateway :18789 config.get，只读） | 200：hash 存在、agents 3、channels=[openclaw-weixin]、providers 1、bind=loopback:18789/auth.mode=token ✅ |
+| 带令牌 GET /api/cron | 200，jobs=0（真实 store 为空，与 P3-E 冒烟一致）✅ |
+| 带令牌 GET /api/config/crews | 200：enabled=[main,it-engineer,content-producer]、available=[sales-cs] ✅ |
+| 带令牌 POST /api/domain/ir/status（空 body） | 400（入参校验护栏生效）✅ |
+| 带令牌页面 ×5 | 全部 200 ✅ |
+| UI DOM 断言（:3000/config） | 配置总览/Channel 绑定/Crew 启停/Provider 轮换/Cron 任务五面板全部渲染；浏览器持陈旧 cookie 的面板显示「缺少或错误的访问令牌」——UI 层鉴权门生效 ✅ |
+| BFF gateway-token 回退路径 | dev server 进程环境无 OPENCLAW_GATEWAY_TOKEN（ps eww 核实仅 .env.local 两键），网关认证成功——回退读 openclaw.json 生效 ✅ |
+| 真实 `~/.openclaw` 写入 | 零写入（本阶段对真实 gateway 仅 config.get / cron.list 只读冒烟）✅ |
+
+**矩阵勘误**：计划矩阵中的 `/engine` 页面不存在（构建路由表无此路由），404 为正确行为——引擎 dashboard 的实际路由是根 `/`。
+
+## Phase 3 完成声明
+
+Phase 3（安全与配置管理）六个任务全部完成并留证：
+
+- **P3-A** BFF 最小鉴权：loopback 校验 + 写路由共享令牌（commit 9120e50）
+- **P3-B** IT engineer apply 脚本与低风险写回 CLI 接口掘取（补录节）
+- **P3-C** 低风险域数据写回 API + UI：分发状态/互动补录/IR 状态/客户跟进（commit 0b6be39）
+- **P3-D** channel 绑定 GUI：dry-run→确认→apply→重启提示（commit e31b162）
+- **P3-E** crew 启停 + provider 凭证轮换 + agent 模型分配 + cron 运维（commit 815f7ca）
+- **P3-F** 全量验证 + :3000 事故修复（本节）
+
+Deviation 共 3 处，均已记录：写回统一走 gateway config.patch RPC（不走 IT apply 脚本）；agent 模型分配走 `agents.update`（计划所引 `modelPolicy.allow` 在 v2026.7.1 不存在）；cron 走 gateway 原生 RPC（计划设想的 MCP 桥接不需要）。
+
+安全边界全程保持：真实 `~/.openclaw` 零写入（真实 gateway 仅只读冒烟）；写验证全部在 `/tmp/xb-p3d-sandbox`；令牌/密钥未落日志（sandbox 用 dummy 占位）；web 永不直改 `openclaw.json`（全部经 config.patch 护栏）。多租户与内置 UI 克隆红线未触碰。
