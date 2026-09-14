@@ -360,3 +360,47 @@ sandbox = `/tmp/xb-p3d-sandbox/openclaw.json`（真实配置拷贝后剥离：bi
 - screenshots 自动化抓取失败（chrome-devtools take_screenshot 持续 -32603），UI 证据以 DOM 断言文本为准
 - feishu 账号除 allowFrom 外若存在模板外的数组字段（当前 schema 无），移除账号时 gateway 护栏将报 400 并透出具体路径——报错即修复路径，未做静默兜底
 - real gateway 的写操作未在真实配置上演练（按约定真实 `~/.openclaw` 零写入；首次真实绑定建议先 preview 打码回显人工确认）
+
+## 2026-09-14 · Phase 3 P3-E：crew 启停 + provider 凭证轮换 + agent 模型 + cron 运维
+
+**掘取结论（影响实现选型）**：
+
+1. **AgentEntrySchema 无 enabled/disabled 字段且 `.strict()`**（`src/config/zod-schema.agent-runtime.ts:1033`）——"启停"不是条目上的开关。产品语义（`docs/sales-cs-bootstrap.md` 停用流程、`crews/main/AGENTS.md` crew 管理）：**启用 = workspace sample（`~/.openclaw/workspace-<id>/openclaw_setting_sample.json`，占位符 `{path_to_.openclaw}`）并入 `agents.list`；停用 = 移除 entry，workspace 与数据保留**。
+2. **计划文档里的 `agents.defaults.modelPolicy.allow` 在 v2026.7.1 schema 中不存在**——agent 模型分配改走引擎原生 `agents.update` RPC（`{agentId, model}`），deviation 记录于此。
+3. **cron 计划设想 MCP 桥接**，实际 gateway 有原生 `cron.*` RPC（scope 同 P3-B 表），BFF 直连 WS 即可，无需 MCP 层——deviation 记录于此。`enabled` 是 job 顶层字段（`CronCommonOptionalFields`）；`state` 是调度器维护的运行态不可写（实测 `cron.update {patch:{state:…}}` 不成立，已改顶层 patch）。
+
+**实现**：
+
+- **crew 启停**（`lib/crew-rpc.ts`）：扫描状态目录下 `workspace-*/openclaw_setting_sample.json` 生成可用列表；启用 = 渲染 sample 后 `config.patch {agents:{list:[entry]}}`（id-keyed 数组按 id 合并，纯新增无需 replacePaths）；停用 = agents.list 滤除后整体替换（`replacePaths:["agents.list"]` 显式声明）。护栏：`main`/`it-engineer` 受保护不可停用（it-engineer 生命周期不受 crew 管理）；停用前扫描配置引用（`bindings[].agentId`、`channels.awada.config.customerdb.agentId`），有引用则 400 并列出——解除后才能停，杜绝悬空路由。
+- **provider 凭证轮换**（`lib/config-rpc.ts` `updateModelProvider`）：仅允许更新已存在 provider 的 apiKey/baseUrl（合并语义，未填字段保留原值；引擎 `restoreRedactedValues` 负责打码哨兵还原，`apiKey` 在 config.get 回显为 `__OPENCLAW_REDACTED__`）。**不开放新建 provider**（自定义 provider 需 baseUrl+models 完整定义，`ModelProvidersSchema` superRefine）。
+- **agent 模型分配**（`/api/config/agent-model` → `agents.update`）。
+- **cron 运维**（`lib/cron-rpc.ts`）：list / run(force|due) / remove / 启停，全部走 gateway 原生 RPC。
+- **UI**（`app/(console)/_components/ops-panels.tsx`）：/config 页新增 CrewPanel（已启用+可启用两段，受保护徽标）、ProviderPanel（provider 下拉 + apiKey/baseUrl 输入，key 不回显）、CronPanel（任务行内 运行/启停/删除）。GET /api/config/gateway 响应增加 agents 与 providers（仅 id+baseUrl，无密钥）切片。
+- 6 个新路由全部挂 `checkApiAuth`：`/api/config/crews`(GET) `/api/config/crews/toggle` `/api/config/provider` `/api/config/agent-model` `/api/cron`(GET) `/api/cron/action`。
+
+**cron add/update 的评估结论（task 原文"cron CRUD 评估"）**：web 只开放 list/run/remove/toggle，不开放新建与改期。理由：`CronAddParamsSchema` 的 agentTurn payload 需 model/fallbacks/toolsAllow 完整定义、isolated 会话目标约束（实测 systemEvent+isolated 被拒），表单复杂度高且极易配错；cron 任务更适合在 agent 会话内自然语言创建（gateway cron tool 已有此路径），web 承担运维动作（看状态/手动触发/停用/删除）。
+
+**验证证据（同一 throwaway sandbox，`/tmp/xb-p3d-sandbox`，真实 `~/.openclaw` 零写入）**：
+
+| 用例 | 结果 |
+|------|------|
+| GET /api/config/crews | enabled=[main*,it-engineer*,content-producer]，available=[sales-cs 销售客服·6 技能]（* = 受保护）✅ |
+| enable sales-cs | 200 ok；文件 agents.list 新增 entry，workspace 渲染为 `/tmp/xb-p3d-sandbox/workspace-sales-cs`，skills/heartbeat 与 sample 一致 ✅ |
+| disable main | 400 "main 为受保护 crew，不可停用" ✅ |
+| disable 有 binding 引用的 sales-cs | 400 "存在对 sales-cs 的引用，请先解除：bindings 中 1 条路由指向 sales-cs" ✅（引用经测试 RPC 注入） |
+| disable 无引用 sales-cs（无 UI 介入） | 200 ok；entry 移除 ✅ |
+| provider baseUrl/apiKey 轮换（dummy key） | 200 ok；文件 baseUrl 更新、apiKey=dummy 值 ✅ |
+| provider 不存在 id | 400 "provider 不存在: nonexistent（web 不开放新建 provider）" ✅ |
+| agent-model content-producer→bailian-token-plan/glm-5.2 | 200；agents.update 回执 ok，文件 model 字段落盘 ✅ |
+| cron list→toggle→run(force)→toggle→remove | 全部 200；run 落 `enqueued:true`、state.lastRunStatus="ok"（22ms）；remove 后 list 为空 ✅ |
+| 浏览器 UI：三面板渲染 | CrewPanel 受保护徽标/可启用列表、ProviderPanel 2 选项、CronPanel 任务行（ui-evidence-job@main 每 1440 分钟）✅ |
+| 浏览器 UI：停用 content-producer → 列表移入"可启用"→ 启用恢复 | confirm 弹窗→成功提示→列表实时刷新，全闭环 ✅ |
+| 真实 gateway 只读冒烟（:3000） | crews enabled=[main*,it-engineer*,content-producer] available=[sales-cs]、cron jobs=[]，与真实状态一致 ✅ |
+| tsc / next lint | 0 错误 ✅ |
+
+**已知限制**：
+
+- cron run(force) 仅确认入队（`enqueued`），任务实际执行的会话产物不在 web 展示（可在聊天页对应 session 查看）
+- crew 启停后 agent 的心跳/会话在 gateway 重启周期内生效（gateway 自动处理），web 不做二次重启确认
+- sample 内容按产品约定信任（与 IT engineer 手工并入同一信任级别），gateway schema 校验兜底非法键
+- sandbox 里 content-producer/sample 等测试夹具随 /tmp 清理消失；真实环境启用 sales-cs 的动作未经真实 gateway 演练（零写入约定）

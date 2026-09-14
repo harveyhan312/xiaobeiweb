@@ -17,6 +17,8 @@ export type ConfigSnapshotSlice = {
   bindings?: unknown;
   pluginLoadPaths?: unknown;
   channels?: Record<string, unknown>;
+  agentsList?: Array<Record<string, unknown>>;
+  modelsProviders?: Record<string, unknown>;
 };
 
 type RawSnapshot = {
@@ -41,6 +43,9 @@ export async function fetchConfigSnapshot(): Promise<ConfigSnapshotSlice> {
     bindings: authored.bindings,
     pluginLoadPaths: (authored.plugins as { load?: { paths?: unknown } } | undefined)?.load?.paths,
     channels: authored.channels as Record<string, unknown> | undefined,
+    agentsList: (authored.agents as { list?: Array<Record<string, unknown>> } | undefined)?.list ?? [],
+    modelsProviders: (authored.models as { providers?: Record<string, unknown> } | undefined)
+      ?.providers,
   };
 }
 
@@ -108,7 +113,7 @@ export async function applyChannelBinding(
   }
 }
 
-async function fetchSnapshotWithRetry(attempts: number): Promise<ConfigSnapshotSlice | null> {
+export async function fetchSnapshotWithRetry(attempts: number): Promise<ConfigSnapshotSlice | null> {
   for (let i = 0; i < attempts; i++) {
     if (i > 0) await new Promise((r) => setTimeout(r, 3000 * i));
     try {
@@ -153,6 +158,64 @@ export async function requestGatewayRestart(): Promise<{
       return {
         accepted: true,
         note: "重启请求发出后连接中断（重启导致）；gateway 已恢复可连通",
+      };
+    }
+    throw err;
+  }
+}
+
+// provider 凭证/baseUrl 轮换：patch 走 merge（对象按键合并，未提供的键保留原值，
+// 引擎 restoreRedactedValues 负责打码哨兵还原）。仅允许更新已存在的 provider，
+// 新建 provider 需 baseUrl+models 完整定义，不在 web 开放。
+export async function updateModelProvider(input: {
+  providerId: string;
+  apiKey?: string;
+  baseUrl?: string;
+}): Promise<{ ok: boolean; note?: string }> {
+  const providerId = input.providerId.trim();
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(providerId)) {
+    throw new GatewayRequestError("INVALID_REQUEST", "providerId 非法");
+  }
+  const fields: Record<string, string> = {};
+  if (typeof input.apiKey === "string" && input.apiKey.trim() !== "") {
+    const apiKey = input.apiKey.trim();
+    if (!/^[\x21-\x7e]{8,300}$/.test(apiKey)) {
+      throw new GatewayRequestError("INVALID_REQUEST", "apiKey 必须为 8-300 位可见 ASCII 字符");
+    }
+    fields.apiKey = apiKey;
+  }
+  if (typeof input.baseUrl === "string" && input.baseUrl.trim() !== "") {
+    const baseUrl = input.baseUrl.trim();
+    if (!/^https?:\/\/[^\s]+$/i.test(baseUrl)) {
+      throw new GatewayRequestError("INVALID_REQUEST", "baseUrl 必须是 http(s) URL");
+    }
+    fields.baseUrl = baseUrl;
+  }
+  if (Object.keys(fields).length === 0) {
+    throw new GatewayRequestError("INVALID_REQUEST", "需要提供 apiKey 或 baseUrl 至少一项");
+  }
+
+  const snap = await fetchConfigSnapshot();
+  const providers = snap.modelsProviders ?? {};
+  if (!(providerId in providers)) {
+    throw new GatewayRequestError(
+      "INVALID_REQUEST",
+      `provider 不存在: ${providerId}（web 不开放新建 provider）`,
+    );
+  }
+  const conn = getGatewayConnection();
+  try {
+    await conn.request("config.patch", {
+      raw: JSON.stringify({ models: { providers: { [providerId]: fields } } }),
+      ...(snap.hash ? { baseHash: snap.hash } : {}),
+    });
+    return { ok: true };
+  } catch (err) {
+    const after = await fetchSnapshotWithRetry(4);
+    if (after && after.modelsProviders && providerId in after.modelsProviders) {
+      return {
+        ok: true,
+        note: "连接因 gateway 自动重启中断；已通过 config.get 复核写盘成功",
       };
     }
     throw err;

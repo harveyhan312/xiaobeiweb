@@ -1,3 +1,4 @@
+import { deriveCrewStates } from "@/lib/crew-rpc";
 import { fetchConfigSnapshot } from "@/lib/config-rpc";
 import { checkApiAuth, authDeniedResponse, jsonResponse } from "@/lib/api-auth";
 import { GatewayRequestError } from "@/lib/gateway";
@@ -10,19 +11,10 @@ export async function GET(req: Request) {
 
   try {
     const snap = await fetchConfigSnapshot();
-    const providers = Object.entries(snap.modelsProviders ?? {}).map(([id, p]) => {
-      const rec = (p ?? {}) as Record<string, unknown>;
-      return { id, baseUrl: typeof rec.baseUrl === "string" ? rec.baseUrl : null };
-    });
+    const states = deriveCrewStates(snap);
     return jsonResponse({
       hash: snap.hash ?? null,
-      exists: snap.exists,
-      valid: snap.valid,
-      bindings: snap.bindings ?? [],
-      pluginLoadPaths: snap.pluginLoadPaths ?? [],
-      channels: snap.channels ?? {},
-      agents: snap.agentsList ?? [],
-      providers,
+      ...states,
     });
   } catch (err) {
     if (err instanceof GatewayRequestError) {

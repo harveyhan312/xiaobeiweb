@@ -1,5 +1,6 @@
 import { getConfigSummary } from "@/lib/xiaobei-data";
 import ChannelBindPanel from "../_components/channel-bind-panel";
+import { CrewPanel, CronPanel, ProviderPanel } from "../_components/ops-panels";
 
 export const dynamic = "force-dynamic";
 
@@ -90,8 +91,11 @@ export default function ConfigPage() {
         </section>
       </div>
 
-      <div className="mt-8">
+      <div className="mt-8 flex flex-col gap-6">
         <ChannelBindPanel />
+        <CrewPanel />
+        <ProviderPanel />
+        <CronPanel />
       </div>
     </div>
   );
