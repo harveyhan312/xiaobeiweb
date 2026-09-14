@@ -116,3 +116,55 @@
 ---
 
 *审核员备注：隔离红线是本项目的立身之本，Phase 1 守得很好。以上发现集中在协议正确性（F2/F5）、连接健壮性（F4）与一处类型阻塞（F6），均不触及红线。修复后请告知，复审将聚焦改动点。*
+
+---
+
+# Phase 2 复核（域 dashboard：业务数据只读视图）
+
+> 范围：`lib/xiaobei-domain.ts` + 6 业务页（publish/dna[+详情]/calibration/bd-ir/customers/videos）+ `_components/markdown.tsx` + 分组导航。
+> 静态检查：`tsc --noEmit` 0 error、`eslint .` 0 error/0 warning。
+
+## 红线复核：全绿 ✅
+
+| 红线 | 证据 |
+|------|------|
+| `~/.openclaw` 零写入 | 写操作/子进程扫描全空，仅 `DatabaseSync readOnly:true` + `readFileSync/readdirSync` |
+| SQL 注入 | 唯一拼接 `SELECT * FROM ${name}`（`:125`），`name` 来自 `sqlite_master` 枚举 + `/^pub_[a-z0-9_]+$/` 守卫，非用户输入 |
+| 路径穿越 | `readWorkspaceTextFile:60` `resolve()+startsWith(MAIN_WS+sep)` 挡 `..`/绝对路径；`platform/dnaId` 经 `^[A-Za-z0-9_-]+$` 校验 |
+| markdown XSS | 无 `rehype-raw`，原始 HTML 转义；默认 `urlTransform` 过滤 `javascript:` |
+| token/越权 | Phase 2 纯只读 server component，不触 BFF chat 路由 |
+
+## Phase 2 发现（4 条，均低/信息级，无阻塞）
+
+### F11 · [低] gateB 里程碑被计算却未渲染
+- 位置：`lib/xiaobei-domain.ts:471`（type 有 gateB）、`:494`（FILES 有 gateB）、`:504-517`（LABELS 漏 gateB）
+- 现象：里程碑定义 13 项含 gateB，但 `VIDEO_MILESTONE_LABELS` 只 12 项 → `videos/page.tsx:35` 按 LABELS 渲染，gateB checkpoint 已算却永不显示。
+- 修复：`VIDEO_MILESTONE_LABELS` 在 `gateA` 后补 `["gateB", "闸门B"]`。
+
+### F12 · [低] 多表查询容错粒度过粗
+- 位置：`lib/xiaobei-domain.ts` `getBdData:271`、`getIrData:372`、`getCustomerData:431`
+- 现象：单一 `try` 包裹两表 `prepare()`；第二表缺失抛错时 `catch` 返回全空，丢弃第一表已查数据。`init-db.sh` 原子建表，概率低。
+- 修复：按表独立 try/catch 或先查 `sqlite_master` 过滤存在的表名。
+
+### F13 · [低] 外链 href 无协议白名单
+- 位置：`publish/page.tsx:78`、`bd-ir/page.tsx:71,120`
+- 现象：DB 字段直接作 `<a href>`，若库内出现 `javascript:`/`data:` URL 点击即 XSS。数据由 agent 写入，风险低。
+- 修复：小工具 `safeUrl(u)` 仅放行 `^https?:`，外链 href 套一层。
+
+### F14 · [信息] 路径守卫不解析 symlink
+- 位置：`lib/xiaobei-domain.ts:60`
+- 处置：当前威胁模型下安全（workspace 由 agent 控制、web 零写入、入参经正则校验），不修，仅记录。未来 workspace 接受外部写入输入时改 `realpath` 校验。
+
+## Phase 2 修复优先级
+
+| 优先级 | 项 | 一句话 |
+|--------|----|--------|
+| P3 | F11 | LABELS 补 gateB（一行） |
+| P3 | F12 | 多表独立 try/catch |
+| P3 | F13 | 外链协议白名单 |
+| 记录 | F14 | 不修，留意 |
+
+## 评估结论：可继续推进 ✅
+Phase 2 红线全绿，双零静态检查，4 条发现均低/信息级无阻塞。F11–F13 修复后可继续 Phase 3。
+
+*Phase 2 复核员备注：域数据层把 SQL 拼接与路径穿越两处高风险点守住了，markdown 渲染选型正确（无 rehype-raw）。剩余均为纵深防御与一处 UI 漏项。修复后复审聚焦改动点。*
