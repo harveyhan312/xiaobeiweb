@@ -443,3 +443,24 @@ Phase 3（安全与配置管理）六个任务全部完成并留证：
 Deviation 共 3 处，均已记录：写回统一走 gateway config.patch RPC（不走 IT apply 脚本）；agent 模型分配走 `agents.update`（计划所引 `modelPolicy.allow` 在 v2026.7.1 不存在）；cron 走 gateway 原生 RPC（计划设想的 MCP 桥接不需要）。
 
 安全边界全程保持：真实 `~/.openclaw` 零写入（真实 gateway 仅只读冒烟）；写验证全部在 `/tmp/xb-p3d-sandbox`；令牌/密钥未落日志（sandbox 用 dummy 占位）；web 永不直改 `openclaw.json`（全部经 config.patch 护栏）。多租户与内置 UI 克隆红线未触碰。
+
+## 2026-09-14 · Phase 3 复核修复（审核员 F15–F18）
+
+审核结论（AUDIT-REPORT.md §Phase 3 复核）：**红线全绿，可继续推进**；7 项红线表全过，tsc/eslint 双零。4 条发现：F15/F16 低危修复，F17/F18 信息级记录。
+
+**F15 · `updateMetrics` 排除 `cal_*` 校准列**（`lib/xiaobei-write.ts`）：P3-C 声明"cal_* 不开放（content-calibrator 职责）"原先只靠列名形状白名单，未排除 cal_ 前缀。现于 `METRIC_COL_RE` 校验后追加前缀拒绝，设计意图与实现对齐。
+
+| 用例 | 结果 |
+|------|------|
+| POST /api/domain/publish/metrics `{"cal_score_pv":100}` | 400 `rejected: 校准列 cal_score_pv 不开放（content-calibrator 职责）` ✅ |
+| POST 同路由 `{"Bad-Col!":100}` | 400 `非法指标列名`（原有守卫不受影响）✅ |
+
+拒绝发生在 BFF 白名单层（`runScript` 之前），验证过程零脚本执行、零写入。
+
+**F16 · 令牌生成熵源换 CSPRNG**（`lib/api-auth.ts`）：自动 provisioning 的令牌熵源由 `pid-时间戳-Math.random()` 改为 `crypto.randomUUID()`（CSPRNG），仍经 sha256+base64url 编码。该分支仅在 `.env.local` 缺失时执行，现有令牌不受影响；改动经 tsc/eslint 验证。
+
+**F17（记录，不修）**：`enableCrew` 依赖 gateway 对 `agents.list` 的 id-keyed merge 语义（新增不覆盖既有条目）。sandbox 真实 gateway 已实证（P3-E），掘取自引擎 `merge-patch.ts`；按真实零写入约定未做真实演练。**操作规程：首次真实启停 crew 前，先 GET /api/config/gateway（config.get 预览）复核 agents.list 完整性。**
+
+**F18（记录，不修）**：gateway 重启竞态的"失败后复核判成功"兜底，在极端并发外部变更下可能误报成功；属必要启发式，可接受。
+
+**回归**：`tsc --noEmit` 0 error、`eslint`（含两改动文件单检）0 error/0 warning；:3000 dev server 热更新后以上用例实测通过。

@@ -1,7 +1,7 @@
 // BFF 最小鉴权（审核 F1）：server 只绑 127.0.0.1（OS 层隔离 LAN），
 // 本模块对全部 /api 路由做第二、三层校验：XFF 非环回拒绝（纵深）+ 共享令牌。
 // 令牌来源：env XB_WEB_TOKEN → .env.local 文件（首次缺失时自动生成并追加）。
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync, existsSync, appendFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 
@@ -50,7 +50,7 @@ export function resolveApiToken(): string | null {
     return memoizedToken;
   }
   const generated = createHash("sha256")
-    .update(`${process.pid}-${Date.now()}-${Math.random()}`)
+    .update(randomUUID())
     .digest("base64url");
   try {
     appendFileSync(ENV_FILE, `\n${TOKEN_KEY}=${generated}\n`, { mode: 0o600 });

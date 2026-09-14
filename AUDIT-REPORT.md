@@ -168,3 +168,59 @@
 Phase 2 红线全绿，双零静态检查，4 条发现均低/信息级无阻塞。F11–F13 修复后可继续 Phase 3。
 
 *Phase 2 复核员备注：域数据层把 SQL 拼接与路径穿越两处高风险点守住了，markdown 渲染选型正确（无 rehype-raw）。剩余均为纵深防御与一处 UI 漏项。修复后复审聚焦改动点。*
+
+---
+
+# Phase 3 复核（安全与配置管理：引入写操作）
+
+> 范围：鉴权 `lib/api-auth.ts`+`lib/client/api.ts`；域写回 `lib/xiaobei-write.ts`+`lib/api-script.ts`+4 路由；config 写回 `lib/config-rpc.ts`+`lib/config-templates.ts`+`lib/crew-rpc.ts`+`lib/cron-rpc.ts`+8 路由；3 个写组件。这是最高风险阶段——首次引入对 `~/.openclaw` 与 `openclaw.json` 的写路径。
+> 静态检查：`tsc --noEmit` 0 error、`eslint .` 0 error/0 warning。
+
+## 红线复核（Phase 3 升级后的写边界）：全绿 ✅
+
+| 红线 | 结论 | 证据 |
+|------|------|------|
+| web 永不直改 `openclaw.json` | ✅ | 全部经 gateway `config.patch` RPC（`config-rpc.ts:93`、`crew-rpc.ts:94/137`、`config-rpc.ts:208`）；schema 校验/密钥还原 `restoreRedactedValues`/`baseHash` 乐观并发/`replacePaths` 破坏性意图确认/.bak 轮转均由 gateway 护栏把关 |
+| 真实 `~/.openclaw` 零写入 | ✅ | 写验证全在 `/tmp/xb-p3d-sandbox`（日志 P3-D/E）；真实 gateway 仅 `config.get`/`cron.list` 只读冒烟；BFF 写操作扫描仅 `appendFileSync`（写令牌到项目内 `.env.local`，不触 `~/.openclaw`） |
+| 域 DB 写回不直连 sqlite | ✅ | `xiaobei-write.ts` 经 `execFile("bash",[script,...args])`（参数数组、无 shell）调 agent 脚本，不 `DatabaseSync` 写 |
+| 鉴权全覆盖 | ✅ | 全部 17 个 `/api` 路由（chat×4 / config×6 / cron×2 / domain×4）顶部挂 `checkApiAuth`；OS `-H 127.0.0.1` 绑定 + 共享令牌 `timingSafeEqual(sha256)` 双防线 |
+| 命令/SQL 注入 | ✅ | execFile 无 shell（参数原样传递）+ 双重白名单：路由层（整数/枚举）→ 写层复检（`INT_RE`/`METRIC_COL_RE`/`TEXT_RE`/`IR_STATUSES`）；脚本侧另有单引号转义 |
+| 越权字段 / scopes | ✅ | gateway connect scopes 增补 `operator.admin`（`gateway.ts:201`）；config 片段全由服务端模板生成，浏览器只上送 `kind+凭证`（`config-templates.ts:189 parseChannelRequest`） |
+| 密钥不落前端 | ✅ | 预览 `maskChannelPatchSecrets` 打码 awadaKey/appSecret；`config.get` 回显 `__OPENCLAW_REDACTED__`；ProviderPanel key 不回显；令牌不进日志 |
+
+## Phase 3 发现（4 条，1 低 + 1 低 + 2 信息，无红线违规）
+
+### F15 · [低] `updateMetrics` 列白名单仅校验形状，可绕过"cal_* 不开放"设计意图
+- **位置**：`lib/xiaobei-write.ts:20` `METRIC_COL_RE=/^[a-z][a-z0-9_]{0,39}$/`、`:90-95` push `--${col}`
+- **现象**：日志 P3-C 声明"cal_* 校准列不开放（content-calibrator 职责）"，但写层只校验列名**形状**，未排除 `cal_*` 前缀、也未对齐 `getMetricColumns()` 的真实指标列清单。绕过 UI 直接调 API（持令牌）可写 `--cal_score_pv 100` 之类校准列。脚本若动态拼 `SET <col>=<val>` 即落库。
+- **风险**：低（令牌门内、本地单用户），但是设计意图与实现的不一致。
+- **修复**：`updateMetrics` 内对列名加 `!col.startsWith("cal_")` 排除，或调 `getMetricColumns(platform)` 取真实列集做白名单。
+
+### F16 · [低] 令牌生成用 `Math.random()`（非密码学安全熵）
+- **位置**：`lib/api-auth.ts:53` `createHash("sha256").update(\`${pid}-${Date.now()}-${Math.random()}\`)`
+- **现象**：自动 provisioning 的令牌熵源非 CSPRNG。OS loopback 绑定是真实边界，令牌是第二层，影响有限。
+- **修复**：改 `crypto.randomUUID()`（一行，熵更强）。
+
+### F17 · [信息] crew 启停依赖 gateway 对 `agents.list` 的 id-keyed merge 语义
+- **位置**：`lib/crew-rpc.ts:94` enableCrew 发 `{agents:{list:[entry]}}` 不带 `replacePaths`
+- **现象**：若 gateway 把 `agents.list` 当普通数组合并（整体替换），enableCrew 会把整个 agent 列表替成单条——误停全部 agent。dev 已在 sandbox 真实 gateway 实证"新增不覆盖"（日志 P3-E），且掘取自 `merge-patch.ts`；但按真实 `~/.openclaw` 零写入约定未做真实演练。
+- **处置**：不修（语义已证）。首次真实启停 crew 前，用 `config.get` preview 复核 `agents.list` 完整性即可。
+
+### F18 · [信息] "失败后复核判成功"启发式在并发外部变更时可能误报
+- **位置**：`lib/config-rpc.ts:104` `channelLanded`+hash 变化判成功、`:215` provider 同模式
+- **现象**：gateway 自动重启掐断响应后，退避取 `config.get` 复核写盘。若期间有**并发外部变更**恰好改了 hash 且目标 channel 已启用，会误报本次 patch 成功。属重启竞态的必要兜底，可接受。
+- **处置**：不修，记录。
+
+## Phase 3 修复优先级
+
+| 优先级 | 项 | 一句话 |
+|--------|----|--------|
+| P3 | F15 | `updateMetrics` 排除 `cal_*` 列 / 对齐真实指标列 |
+| P3 | F16 | 令牌生成改 `crypto.randomUUID` |
+| 记录 | F17 | 首次真实启停 crew 前 preview 复核 |
+| 记录 | F18 | 不修 |
+
+## 评估结论：可继续推进 ✅
+Phase 3 是立项目标中风险最高的阶段（首次开写面），但红线守住：`openclaw.json` 全程经 gateway `config.patch` 护栏、真实 `~/.openclaw` 零写入、域写回经 execFile 脚本白名单、17 路由鉴权全覆盖、命令注入双白名单。tsc/eslint 双零。仅 F15/F16 两处低危纵深防御 + 2 信息项，无阻塞。修完可视为 Phase 3 收尾。
+
+*Phase 3 复核员备注：脚本信任边界处理得很好——execFile 无 shell + 路由/写层双重白名单是教科书级纵深防御；config 写回复用 gateway 原生 `config.patch` 护栏（而非自研写盘）是正确选型，把 schema/并发/.bak/重启都甩给引擎。最大残余风险是 F17 的数组合并语义依赖，sandbox 已证但真实环境未演练——首次真实写操作务必 preview。整体可推进。*

@@ -90,6 +90,9 @@ export function updateMetrics(
   for (const [col, val] of entries) {
     const v = String(val);
     if (!METRIC_COL_RE.test(col)) return Promise.resolve(reject(`非法指标列名: ${col}`));
+    if (col.startsWith("cal_")) {
+      return Promise.resolve(reject(`校准列 ${col} 不开放（content-calibrator 职责）`));
+    }
     if (!METRIC_VALUE_RE.test(v)) return Promise.resolve(reject(`指标 ${col} 仅接受非负整数`));
     args.push(`--${col}`, v);
   }
