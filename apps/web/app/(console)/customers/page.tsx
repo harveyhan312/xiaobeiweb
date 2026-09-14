@@ -1,5 +1,7 @@
 import { getCustomerData } from "@/lib/xiaobei-domain";
 
+import { FollowUpActions } from "../_components/domain-write";
+
 export const dynamic = "force-dynamic";
 
 const CS_STATUS_STYLE: Record<string, string> = {
@@ -22,8 +24,9 @@ export default function CustomersPage() {
     <div className="mx-auto max-w-5xl">
       <h1 className="mb-1 text-lg font-semibold">客户库</h1>
       <p className="mb-4 text-xs text-neutral-500">
-        workspace-sales-cs/db/customer.db（只读）。cs_record 的 business_status 由系统 hook
-        在支付/入群事件写入，web 不改；跟进任务由 sales-cs crew 维护。
+        workspace-sales-cs/db/customer.db。cs_record 的 business_status 由系统 hook
+        在支付/入群事件写入，web 不改；跟进任务由 sales-cs crew 维护，控制台可标记完成/取消
+        （BFF 经 customer-db 具名脚本）。
       </p>
 
       <section className="mb-8">
@@ -94,6 +97,7 @@ export default function CustomersPage() {
                 {f.contextSummary && (
                   <p className="mt-1 line-clamp-2 text-xs text-neutral-500">{f.contextSummary}</p>
                 )}
+                <FollowUpActions id={f.id} peer={f.peer} />
               </div>
             ))}
           </div>

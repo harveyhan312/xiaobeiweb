@@ -33,6 +33,7 @@ export const PLATFORM_LABELS: Record<string, string> = {
 };
 
 const PLATFORM_SET = new Set(Object.keys(PLATFORM_LABELS));
+export { PLATFORM_SET };
 
 export type DomainPlatform = {
   id: string;
@@ -95,6 +96,7 @@ function queryTable(
 // ── 发布记录（workspace-main/db/published_track.db，每平台一张 pub_<platform> 表）──
 
 export type PublishedRow = {
+  id: number;
   platform: string;
   platformLabel: string;
   title: string;
@@ -146,6 +148,7 @@ export function getPublishedRows(limit = 200): PublishedRow[] {
           if (!COMMON_PUB_COLS.has(k) && typeof v === "number") metrics[k] = v;
         }
         rows.push({
+          id: Number(r.id ?? 0),
           platform,
           platformLabel: PLATFORM_LABELS[platform] ?? platform,
           title: String(r.title ?? ""),
@@ -160,6 +163,26 @@ export function getPublishedRows(limit = 200): PublishedRow[] {
       }
     }
     return rows.sort((a, b) => b.publishDate.localeCompare(a.publishDate)).slice(0, limit);
+  } finally {
+    db.close();
+  }
+}
+
+// 平台表的互动指标列（PRAGMA 实时枚举）：排除公共列与 cal_* 校准列（校准分由 content-calibrator 维护，web 不写）
+export function getMetricColumns(platform: string): string[] {
+  if (!PLATFORM_SET.has(platform)) return [];
+  const db = openDomainDb(join(MAIN_WS, "db", "published_track.db"));
+  if (!db) return [];
+  try {
+    const info = db.prepare(`PRAGMA table_info(pub_${platform})`).all() as Array<{
+      name: string;
+      type: string;
+    }>;
+    return info
+      .map((c) => c.name)
+      .filter((n) => !COMMON_PUB_COLS.has(n) && !n.startsWith("cal_") && n !== "updated_at");
+  } catch {
+    return [];
   } finally {
     db.close();
   }

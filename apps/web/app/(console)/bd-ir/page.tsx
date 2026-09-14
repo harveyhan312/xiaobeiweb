@@ -1,17 +1,9 @@
 import { getBdData, getIrData, getIntelItems, PLATFORM_LABELS } from "@/lib/xiaobei-domain";
+import { IR_STATUSES } from "@/lib/xiaobei-write";
+
+import { IrStatusControl } from "../_components/domain-write";
 
 export const dynamic = "force-dynamic";
-
-const IR_STATUS_STYLE: Record<string, string> = {
-  new: "bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300",
-  contacted: "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
-  bp_sent: "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
-  meeting: "bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300",
-  dd: "bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300",
-  ts: "bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300",
-  invested: "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300",
-  passed: "bg-neutral-200 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400",
-};
 
 function Badge({ status, style }: { status: string; style?: Record<string, string> }) {
   const cls =
@@ -40,8 +32,8 @@ export default function BdIrPage() {
     <div className="mx-auto max-w-5xl">
       <h1 className="mb-1 text-lg font-semibold">BD · IR</h1>
       <p className="mb-4 text-xs text-neutral-500">
-        workspace-main/db/ 下 bd_record.db / info_record.db / ir_record.db（只读）。记录由 agent
-        经 expert-bd / expert-ir 维护，本页不提供写操作。
+        workspace-main/db/ 下 bd_record.db / info_record.db / ir_record.db。IR 投资人状态可在此推进
+        （BFF 经 ir-record update-status，枚举校验）；其余记录由 agent 经 expert-bd / expert-ir 维护。
       </p>
 
       <section className="mb-8">
@@ -189,7 +181,7 @@ export default function BdIrPage() {
                     <td className="py-2 pr-3 text-neutral-500">{v.type}</td>
                     <td className="py-2 pr-3">{v.firm}</td>
                     <td className="py-2 pr-3">
-                      <Badge status={v.status} style={IR_STATUS_STYLE} />
+                      <IrStatusControl id={v.id} status={v.status} statuses={IR_STATUSES} />
                     </td>
                     <td className="max-w-xs py-2 pr-3 text-xs text-neutral-500">
                       <span className="line-clamp-2">{v.focusAreas ?? "—"}</span>

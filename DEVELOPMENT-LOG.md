@@ -239,3 +239,55 @@ xiaobei 是开源的自媒体获客 AI agent 产品（TeamWiseFlow/xiaobei，本
 - 原生 prompt 对话框在浏览器自动化中被框架自动关闭，未能自动化模拟"粘贴令牌"本身；已用等效路径（写入 localStorage+cookie）验证 storeToken 之后的全链路，prompt→store→retry 代码路径简单直接，首次真实使用时人工确认即可
 - 令牌为单用户共享凭据（本机单人场景足够）；未来多用户需升级为 per-user 会话
 - -H 绑定只在通过 `pnpm dev`/`pnpm start` 启动时生效（自定义启动方式需自行带上参数）
+
+---
+
+## 2026-09-14 · Phase 3 P3-C：低风险域数据写回 API + UI
+
+计划文档 §5 指定走 agent 侧已封装的具名子命令（published-track / ir-record / customer-db 脚本），不直改库。落点：业务 3 页从只读升级为"低风险写回"（tsc/eslint 双零）。
+
+**安全设计（脚本信任边界分析）**：
+
+- 逐行核对三个脚本源码：**脚本对 `--id`/`--platform` 不做整数/枚举校验即拼 SQL**（如 set-distribute-status.sh `WHERE id = $ID`），值仅做单引号转义。因此 BFF 必须白名单化全部入参，不能透传
+- **执行方式**：`execFile("bash", [script, ...args])` 参数数组、无 shell，杜绝参数注入；timeout 15s、maxBuffer 1MB
+- **双重校验**：API 路由层做白名单（返回干净 400），`lib/xiaobei-write.ts` 写回层对整数/枚举/字符集再复检一次（`rejected:` 前缀 → 400）
+- **收敛写面**：BFF 只开放**按 id 单行写**；脚本的 `--source-folder` 批量写与 `--mark-all-distributed` 全平台批量不开放给 web（误伤面大，仍留给 agent）；指标补录仅接受非负整数、≤8 列/次；IR 备注限 500 字且禁控制字符；cal_* 校准列不开放（content-calibrator 职责）
+
+**脚本定位约定**：脚本以自身路径推导 workspace ROOT（不读环境变量），写回层按读层同一约定用 `OPENCLAW_STATE_DIR` 解析脚本绝对路径——生产默认 `~/.openclaw`，sandbox 测试指向夹具树即可整体切换，与读层（xiaobei-domain）天然一致。
+
+**改动清单**：
+
+- 新增 `lib/xiaobei-write.ts`：5 个写函数（setDistributeStatus/updateMetrics/updateIrStatus/completeFollowUp/cancelPendingFollowUps）+ IR 状态机枚举导出（new→contacted→bp_sent→meeting→dd→ts→invested，任意阶段可 passed，与 expert-ir SKILL.md 一致）
+- 新增 `lib/api-script.ts`：脚本 JSON/纯文本输出统一映射（ok→200 含脚本回执；rejected→400；脚本失败→502 透传脚本错误信息）
+- 新增 4 个写路由（全部挂 P3-A 鉴权守卫）：`/api/domain/publish/distribute-status`、`/api/domain/publish/metrics`、`/api/domain/ir/status`、`/api/domain/customers/followup`（action: complete/cancel）
+- 读层增强：`PublishedRow` 补 `id`（写操作按行定位的前提）、`getMetricColumns()` PRAGMA 实时枚举指标列（排除公共列/cal_*/updated_at）、`PLATFORM_SET` 导出
+- 新增 `app/(console)/_components/domain-write.tsx`：4 个客户端组件（DistributeControl 分发下拉 / MetricsForm 指标补录 / IrStatusControl 状态+备注 / FollowUpActions 完成与取消），经 `postDomainJson`（带令牌）成功后 `router.refresh()`
+- 页面接线：/publish 加操作列、/bd-ir IR 状态单元格改控件、/customers 跟进卡加按钮；三页页脚"只读/不提供写操作"措辞同步更新
+
+**验证证据（sandbox 夹具，`OPENCLAW_STATE_DIR=/tmp/xb-write-fixture`）**：
+
+夹具 = 真实脚本树拷贝 + 各自 init-db.sh 建库 + 播种行；验证全程真实 `~/.openclaw` 零写入（终检 workspace-main/db 仍不存在）。
+
+| 用例 | 结果 |
+|------|------|
+| 分发状态 →2 | 200 `{ok:true,action:"updated",distribute_status:2}`，库中落库 ✅ |
+| 指标补录 views=1000 likes=120 | 200 `updated_columns:2`，库中 1000/120 ✅ |
+| 注入 id `"1 OR 1=1"` | 400（路由整数白名单拦截，未达脚本）✅ |
+| 注入 platform `"xhs; DROP TABLE…"` | 400（平台枚举拦截）✅ |
+| 注入指标列 `"views; DROP TABLE…--"` | 400（写回层列名白名单拦截）✅ |
+| IR 状态 →meeting + 备注 | 200 `{ok:true}`，库中 status/notes 落库 ✅ |
+| IR 非法状态 `"hacked"` | 400（状态机枚举拦截）✅ |
+| 跟进 complete id=1 | 200，库中 status=completed、completed_at 置值 ✅ |
+| 跟进 cancel by peer | 200 ✅ |
+| 无令牌调用写 API | 401 ✅ |
+| 浏览器 UI：/publish 夹具行渲染（下拉=已分发、指标 1000/120、补录按钮） | ✅ |
+| 浏览器 UI：IR 下拉实际改为 contacted | UI→API→脚本→DB 全链路落库 ✅ |
+| 浏览器 UI：/customers 跟进按钮渲染 | ✅ |
+| :3000 正式 server 空态回归 | 无报错、空态正常 ✅ |
+
+**已知限制**：
+
+- 三个域库本机均未创建（与 Phase 2 结论一致）——写 API 在真实库出现前会透传脚本错误（"database not initialized"），UI 显示红字报错；agent 首次建库后零改动生效
+- 指标补录仅开放数值列；文本型指标列（如 top_comment/notes）未开放
+- customer-db 脚本输出为纯文本 emoji 行（非 JSON），BFF 映射为 `{ok:true,message}`——若未来脚本改 JSON 输出无需改 BFF
+- follow-up complete 的回执文本留空时记为"web 控制台标记完成"（区分于 agent 真实发送的回执）

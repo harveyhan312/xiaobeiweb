@@ -1,4 +1,6 @@
-import { distributeLabel, getPublishedRows } from "@/lib/xiaobei-domain";
+import { distributeLabel, getMetricColumns, getPublishedRows } from "@/lib/xiaobei-domain";
+
+import { DistributeControl, MetricsForm } from "../_components/domain-write";
 
 export const dynamic = "force-dynamic";
 
@@ -10,13 +12,17 @@ const DIST_STYLE: Record<number, string> = {
 
 export default function PublishPage() {
   const rows = getPublishedRows(200);
+  const metricCols = new Map<string, string[]>();
+  for (const p of new Set(rows.map((r) => r.platform))) {
+    metricCols.set(p, getMetricColumns(p));
+  }
 
   return (
     <div className="mx-auto max-w-6xl">
       <h1 className="mb-1 text-lg font-semibold">发布记录</h1>
       <p className="mb-4 text-xs text-neutral-500">
-        引擎 published_track.db（只读，按平台 pub_* 表）。分发状态由 agent 经 published-track
-        维护，本页不提供写操作。
+        引擎 published_track.db（按平台 pub_* 表）。分发状态与互动指标可在此低风险写回（BFF 经
+        published-track 具名子命令，按 id 单行写入）；其余字段由 agent 维护。
       </p>
 
       {rows.length === 0 ? (
@@ -37,7 +43,8 @@ export default function PublishPage() {
                 <th className="py-2 pr-3 font-medium">互动指标</th>
                 <th className="py-2 pr-3 font-medium">DNA</th>
                 <th className="py-2 pr-3 font-medium">账号</th>
-                <th className="py-2 font-medium">链接</th>
+                <th className="py-2 pr-3 font-medium">链接</th>
+                <th className="py-2 font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -72,7 +79,7 @@ export default function PublishPage() {
                   </td>
                   <td className="py-2 pr-3 text-xs text-neutral-500">{r.dnaId ?? "—"}</td>
                   <td className="py-2 pr-3 text-xs text-neutral-500">{r.account ?? "—"}</td>
-                  <td className="py-2 text-xs">
+                  <td className="py-2 pr-3 text-xs">
                     {r.publishUrl ? (
                       <a
                         href={r.publishUrl}
@@ -85,6 +92,17 @@ export default function PublishPage() {
                     ) : (
                       "—"
                     )}
+                  </td>
+                  <td className="py-2">
+                    <div className="flex flex-col gap-1.5">
+                      <DistributeControl platform={r.platform} id={r.id} status={r.distributeStatus} />
+                      <MetricsForm
+                        platform={r.platform}
+                        id={r.id}
+                        columns={metricCols.get(r.platform) ?? []}
+                        current={r.metrics}
+                      />
+                    </div>
                   </td>
                 </tr>
               ))}

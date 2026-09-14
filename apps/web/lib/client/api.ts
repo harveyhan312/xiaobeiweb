@@ -40,3 +40,20 @@ export async function apiFetch(input: string, init?: RequestInit): Promise<Respo
   }
   return res;
 }
+
+// 域写操作统一入口：POST JSON → {ok, data|error}；401 令牌流程由 apiFetch 内部处理
+export async function postDomainJson(
+  url: string,
+  body: unknown,
+): Promise<{ ok: boolean; data?: Record<string, unknown>; error?: string }> {
+  const res = await apiFetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!res.ok || !data || data.ok === false) {
+    return { ok: false, error: String(data?.error ?? `HTTP ${res.status}`) };
+  }
+  return { ok: true, data };
+}
