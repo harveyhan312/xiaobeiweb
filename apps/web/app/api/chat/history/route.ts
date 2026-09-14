@@ -1,10 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { authDeniedResponse, checkApiAuth } from "@/lib/api-auth";
 import { getGatewayConnection, isValidWebSessionKey } from "@/lib/gateway";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
+  const denied = checkApiAuth(req);
+  if (denied) return authDeniedResponse(denied);
+
   const sessionKey = req.nextUrl.searchParams.get("sessionKey") ?? "";
   if (!isValidWebSessionKey(sessionKey)) {
     return NextResponse.json({ error: "invalid sessionKey" }, { status: 400 });

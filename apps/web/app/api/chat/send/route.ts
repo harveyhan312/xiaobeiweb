@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { authDeniedResponse, checkApiAuth } from "@/lib/api-auth";
 import { GatewayRequestError, getGatewayConnection, isValidWebSessionKey } from "@/lib/gateway";
 
 export const dynamic = "force-dynamic";
@@ -7,6 +8,9 @@ export const dynamic = "force-dynamic";
 const MAX_MESSAGE_CHARS = 32_000;
 
 export async function POST(req: NextRequest) {
+  const denied = checkApiAuth(req);
+  if (denied) return authDeniedResponse(denied);
+
   let body: { sessionKey?: string; message?: string; idempotencyKey?: string };
   try {
     body = (await req.json()) as typeof body;

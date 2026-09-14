@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { apiFetch } from "@/lib/client/api";
+
 type ChatMsg = {
   id: string;
   role: "user" | "assistant";
@@ -137,7 +139,7 @@ export default function ChatPage() {
 
     let disposed = false;
 
-    fetch(`/api/chat/history?sessionKey=${encodeURIComponent(key)}`)
+    apiFetch(`/api/chat/history?sessionKey=${encodeURIComponent(key)}`)
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error("history failed"))))
       .then((data: { messages?: HistoryMessage[] }) => {
         if (disposed || !data.messages?.length) return;
@@ -185,7 +187,7 @@ export default function ChatPage() {
       { id: `${placeholderId}-a`, role: "assistant", text: "", streaming: true },
     ]);
     const postSend = () =>
-      fetch("/api/chat/send", {
+      apiFetch("/api/chat/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionKey, message: text, idempotencyKey }),
@@ -237,7 +239,7 @@ export default function ChatPage() {
   const abort = useCallback(async () => {
     if (!sessionKey || !activeRunId) return;
     try {
-      await fetch("/api/chat/abort", {
+      await apiFetch("/api/chat/abort", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionKey, runId: activeRunId }),

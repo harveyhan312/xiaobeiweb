@@ -194,3 +194,48 @@ xiaobei 是开源的自媒体获客 AI agent 产品（TeamWiseFlow/xiaobei，本
 - **F13 外链协议白名单**：新增 `lib/safeUrl()`（仅放行 `^https?:`，trim 后判定）；接线在**数据层出口**而非逐个 href——`publishUrl`/`homepageUrl`/`postUrl` 进类型前即过滤，非法值置 null，对应 `LeadCreator.homepageUrl`/`CommentPost.postUrl` 类型收紧为 `string | null`，bd-ir 页两处 `<a>` 改条件渲染（publish 页原本就按 null 条件渲染，零改动）
 - **F14 路径守卫不解析 symlink**：按审核意见**不修，记录在案**——当前威胁模型安全（workspace 由 agent 控制、web 零写入、入参正则校验）；未来 workspace 接受外部输入时改 `realpath` 校验
 - **验证**：tsc 0 error、eslint 0/0；/tmp 部分表夹具（只有 lead_creators 无 comment_posts）经 node 实测——lead 数据保留、缺表返回空数组不崩溃；safeUrl 7 组用例全过（https 放行含 trim、javascript:/data:/相对路径/空/null 均置 null）；:3000 八页全 200，`/videos` 空态动态显示 13 阶段
+
+---
+
+## 2026-09-14 · Phase 3 P3-A：BFF 最小鉴权（审核 F1 前置项）
+
+审核 F1 指出：/api 路由无任何鉴权，LAN 内任意设备可调用 chat.send 操纵 agent。P3-A 落地三层防线（tsc/eslint 双零）。
+
+**设计决策（含一次实证修正）**：
+
+- **初案否决**：原计划用 `X-Forwarded-For` 判定客户端是否环回——实测 `curl -H "X-Forwarded-For: 8.8.8.8" http://127.0.0.1:3000/...` 该头原样透传进 route handler，**客户端可任意伪造**，不能作为信任边界。降级为纵深防御信号。
+- **三层防线**（真正的边界是前两层）：
+  1. **OS 层**：`package.json` dev/start 脚本加 `-H 127.0.0.1`，server 只绑环回接口，LAN 设备 TCP 连接直接被拒（OS 级，无代码可绕）；
+  2. **共享令牌**：全部 /api 路由要求 `x-xb-token` 头或 `xb_token` cookie（后者为 EventSource 无法带自定义头的替代通道），常时比较（`timingSafeEqual(sha256(a), sha256(b))` 防时序侧信道）；令牌来源 `env XB_WEB_TOKEN` → `.env.local`（首次缺失自动生成 base64url 43 位并追加，gitignored）；浏览器侧 `lib/client/api.ts` 的 `apiFetch` 自动带头，401 `NEEDS_TOKEN` 时弹原生 prompt 引导粘贴一次，存 localStorage 并镜像 cookie；
+  3. **XFF 纵深**：非环回 XFF 首跳直接 403 `FORBIDDEN_REMOTE`（可被伪造绕过，故仅作哨兵）。
+
+**改动清单**：
+
+- 新增 `lib/api-auth.ts`：`checkApiAuth`/`authDeniedResponse`/`resolveApiToken`（自动 provisioning + 进程内 memoize；向既有文件追加后 best-effort `chmod 0600`——`appendFileSync` 的 mode 仅新建时生效）
+- 新增 `lib/client/api.ts`：`apiFetch`（自动令牌 + 401 引导重试）、`storeToken`（localStorage + cookie 镜像）
+- 4 个 chat 路由（send/history/abort/events）handler 顶部统一接线守卫
+- `app/page.tsx` 三处 fetch（history/send/abort）改走 `apiFetch`；EventSource URL 不变（走镜像 cookie）；其余 console 页为 server component 直读域库，不经 /api，无需改动
+- `package.json`：`dev`/`start` 加 `-H 127.0.0.1`
+- `.env.local` 实际权限收紧为 `0600`（验证 `stat` 确认）
+
+**验证证据**（curl 鉴权矩阵 + 浏览器实测）：
+
+| 用例 | 结果 |
+|------|------|
+| 无令牌 → /api/chat/history | 401 `NEEDS_TOKEN` ✅ |
+| 错误令牌 | 401 `NEEDS_TOKEN` ✅ |
+| 正确令牌（header） | 200 `{"messages":[]}` ✅ |
+| 正确令牌（cookie，EventSource 通道） | 200 ✅ |
+| 正确令牌 + 伪造 XFF 8.8.8.8 | 403 `FORBIDDEN_REMOTE` ✅ |
+| LAN 接口 `http://10.2.112.68:3000`（en0 IP） | connection refused（exit 7）——绑定生效 ✅ |
+| 浏览器：清除令牌后访问 / | history/events 均 401（守卫真实拦截浏览器请求）✅ |
+| 浏览器：按 storeToken 等效路径写入 localStorage+cookie 后刷新 | history 200、SSE 认证通过连接点变绿（bg-green-500）✅ |
+
+- 静态检查：`tsc --noEmit` 0 error（修复 `AuthFailure.status` 漏 500、`Response.json` 静态方法在当前 lib 下不可用两处类型错误）、`eslint` 0/0
+
+**已知限制**：
+
+- 首次冷启动时序：dev server 首个 API 请求触发令牌生成并追加 `.env.local`，随后日志打印落点提示；若`.env.local` 只读则退化为进程内令牌（重启即换，浏览器需重新粘贴），日志已注明
+- 原生 prompt 对话框在浏览器自动化中被框架自动关闭，未能自动化模拟"粘贴令牌"本身；已用等效路径（写入 localStorage+cookie）验证 storeToken 之后的全链路，prompt→store→retry 代码路径简单直接，首次真实使用时人工确认即可
+- 令牌为单用户共享凭据（本机单人场景足够）；未来多用户需升级为 per-user 会话
+- -H 绑定只在通过 `pnpm dev`/`pnpm start` 启动时生效（自定义启动方式需自行带上参数）
