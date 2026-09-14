@@ -1,4 +1,5 @@
 import { getConfigSummary } from "@/lib/xiaobei-data";
+import ChannelBindPanel from "../_components/channel-bind-panel";
 
 export const dynamic = "force-dynamic";
 
@@ -9,8 +10,8 @@ export default function ConfigPage() {
     <div className="mx-auto max-w-5xl">
       <h1 className="mb-1 text-lg font-semibold">配置总览</h1>
       <p className="mb-4 text-xs text-neutral-500">
-        ~/.openclaw/openclaw.json 摘要（只读，密钥字段已剔除）。修改配置必须走 IT engineer
-        apply 脚本，本页不提供写操作。
+        ~/.openclaw/openclaw.json 摘要（只读，密钥字段已剔除）。channel 绑定写走 gateway
+        config.patch RPC（模板生成 + 预览确认），其余修改仍走 IT engineer apply 脚本。
       </p>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -87,6 +88,10 @@ export default function ConfigPage() {
             <dd>{cfg.gateway.authMode ?? "—"}</dd>
           </dl>
         </section>
+      </div>
+
+      <div className="mt-8">
+        <ChannelBindPanel />
       </div>
     </div>
   );

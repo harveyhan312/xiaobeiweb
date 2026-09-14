@@ -196,8 +196,9 @@ export class GatewayConnection {
                   mode: "backend",
                 },
                 role: "operator",
-                // 默认拒绝策略：scopes 必须显式声明；本地 backend + token 认证会保留所请求 scopes
-                scopes: ["operator.read", "operator.write"],
+                // 默认拒绝策略：scopes 必须显式声明；本地 backend + token 认证会保留所请求 scopes。
+                // admin 用于 P3-D/P3-E 配置写（config.patch / gateway.restart / cron.*）
+                scopes: ["operator.read", "operator.write", "operator.admin"],
                 auth: { token },
               },
             }),

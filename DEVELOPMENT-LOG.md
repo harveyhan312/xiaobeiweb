@@ -291,3 +291,72 @@ xiaobei 是开源的自媒体获客 AI agent 产品（TeamWiseFlow/xiaobei，本
 - 指标补录仅开放数值列；文本型指标列（如 top_comment/notes）未开放
 - customer-db 脚本输出为纯文本 emoji 行（非 JSON），BFF 映射为 `{ok:true,message}`——若未来脚本改 JSON 输出无需改 BFF
 - follow-up complete 的回执文本留空时记为"web 控制台标记完成"（区分于 agent 真实发送的回执）
+
+## 2026-09-14 · Phase 3 P3-B（补录）：CLI/gateway 接口掘取结论
+
+P3-B 的产出直接支撑了 P3-C（写回走脚本）与 P3-D（写回走 config.patch RPC）的选型，此前未成节，此处补录供审核复核。
+
+**掘取路径**：引擎安装在 `/Users/harvey/xiaobei/openclaw/`（非本仓），读 `src/gateway/server-methods/config.ts`、`src/gateway/methods/core-descriptors.ts`、`packages/gateway-protocol/src/schema/config.ts`、`src/config/merge-patch.ts`，以及 crews/it-engineer 下两个 channel sample（awada-channel-setup、work-channel-binding）。
+
+**Method→scope 表（core-descriptors.ts，与本工程相关的部分）**：
+
+| method | scope |
+|--------|-------|
+| config.get / gateway.restart.preflight / cron.list 等 | operator.read |
+| chat.send | operator.write |
+| config.patch / config.apply / cron.add / agents.create 等 | operator.admin |
+| chat.inject | operator.admin（admin-only 注入，本工程不使用） |
+
+**config.patch 参数**（ConfigPatchParamsSchema）：`{raw: string(JSON5 部分配置), baseHash?, replacePaths?: string[](≤256), note?, restartDelayMs?}`；响应 `{ok, path, config(打码), restart, sentinel}`。config.get 响应含 `hash`（即 baseHash）与 `resolved`（磁盘 authored 值，未掺运行时默认——patch 合并基准，避免运行时默认泄漏进写盘配置）。
+
+**选型结论（架构 deviation，审核重点）**：
+
+1. **域数据写回（P3-C）走 agent 侧脚本**（execFile 白名单），不走 gateway——域库（customer.db 等）是 agent 工作区文件，不在 openclaw.json 配置面内，gateway 无对应 RPC。
+2. **channel 绑定写回（P3-D）走 gateway config.patch RPC**，不走 it-engineer apply 脚本——apply 脚本是给 agent 在聊天流里用的（依赖交互式确认），BFF 无法复用其确认流；config.patch 是 gateway 原生控制面，自带 schema 校验、密钥还原（restoreRedactedValues）、baseHash 乐观并发、破坏性数组补丁意图确认（replacePaths）、.bak 轮转与重启计划计算，护栏强于自研脚本封装。
+3. **channel 铁律沿用**（it-engineer/AGENTS.md:92）：patch 只写 `bindings[].match.channel` + `channels.<name>` + `plugins.entries.<name>` 三处，模板即唯一写面。
+
+## 2026-09-14 · Phase 3 P3-D：channel 绑定 GUI（dry-run→确认→apply→重启提示）
+
+**设计**：
+
+- **模板即唯一写面**（`lib/config-templates.ts`）：BFF 只接受 `kind + 凭证` 参数（awada: awadaKey；feishu: 1-8 组 accountId/appId/appSecret），patch fragment 全由服务端模板生成，浏览器不可能上送任意配置片段。awada 模板与 `awada-channel-setup/openclaw-awada-sample.json` 一致（channels.awada + plugins.load.paths 追加 + entries.awada.customerdb 指向 sales-cs workspace）；feishu 模板与 `work-channel-binding/samples/feishu-openclaw.json` 一致（bindings 过滤现有 feishu 路由后追加 + channels.feishu.accounts + entries.feishu.enabled）。
+- **预览/apply 分离**（`lib/config-rpc.ts`）：preview 用 fresh `config.get` 取 baseHash + 当前切片 → 返回打码 patch（`maskChannelPatchSecrets`：awadaKey/appSecret→`****`）+ summary + replacePaths；apply 再取 fresh baseHash 后发 `config.patch`（乐观并发由 gateway 二次把关）。
+- **权限面**：gateway connect scopes 增补 `operator.admin`（`lib/gateway.ts:200`）；4 个 `/api/config/*` 路由全部挂 `checkApiAuth`（写类 POST 同时受 OS loopback + 令牌双防线）。
+- **页面**（`app/(console)/_components/channel-bind-panel.tsx`）：/config 页新增 ChannelBindPanel——kind 选择 → 凭证表单 → 预览（打码 JSON + summary + replacePaths + baseHash 前缀）→ 确认写回（绿色成功块 + restart/sentinel JSON + .bak 提示）→ 手动重启按钮（preflight + request 回显）。
+
+**掘取发现的引擎语义（实现据此修正）**：
+
+1. **响应 vs 自动重启竞态**：channel 变更触发 gateway 自动重启（SIGUSR1 in-process），重启可能先于响应送达掐断 WS——实测首跑 apply 文件已写、.bak 已生成但 BFF 侧超时（gateway log：`config.patch write` → `received SIGUSR1` → `res ✓ config.patch` 顺序不定）。兜底：apply 失败后以 3s/6s/9s 退避重取 `config.get`，若目标 channel 已启用且 hash 变化则判成功并附 note（`fetchSnapshotWithRetry`）；`gateway.restart.request`（delayMs=0）同理。
+2. **replacePaths 只对数组生效**（`merge-patch.ts:104` 仅在 Array 分支检查）：`channels.feishu.accounts` 是普通对象走 merge，旧账号不会自动清除。修正：模板把"当前有、本次未提交"的账号补成 `null`（merge-patch 的 null 删键语义），实测残留 it-bot 被正确清除。
+3. **null 删账号连带移除其 allowFrom 数组，触发破坏性补丁护栏**（`would remove entries from array path(s): channels.feishu.accounts.it-bot.allowFrom`）：修正：对每个被移除账号显式声明 `replacePaths: ["bindings", "channels.feishu.accounts.<id>.allowFrom"]`（账号结构由模板定义，allowFrom 是其中唯一数组）。bindings 为 id-keyed 数组、整体替换本就需声明。
+4. **bindings-only 变更 `requiresRestart:false`**（sentinel 实证），credentials 变更才需重启——UI 重启提示按 gateway 返回的 restart 计划呈现而非写死。
+
+**改动清单**：`lib/config-templates.ts`（新增）、`lib/config-rpc.ts`（新增）、`app/api/config/gateway/route.ts`（GET 快照切片）、`app/api/config/channel/preview/route.ts`、`app/api/config/channel/apply/route.ts`、`app/api/config/gateway/restart/route.ts`（新增）、`app/(console)/_components/channel-bind-panel.tsx`（新增）、`app/(console)/config/page.tsx`（接线 + 页脚措辞更新）、`lib/api-auth.ts`（加 jsonResponse helper，因当前 lib 无 Response.json 静态方法）、`lib/gateway.ts`（scopes）。
+
+**验证证据（throwaway sandbox gateway）**：
+
+sandbox = `/tmp/xb-p3d-sandbox/openclaw.json`（真实配置拷贝后剥离：bind=loopback、port=18795、独立 token、channels/plugins 全 disabled、AWK_API_KEY 用假占位注入进程环境）；:3004 dev server 以 `OPENCLAW_GATEWAY_URL/OPENCLAW_GATEWAY_TOKEN/OPENCLAW_STATE_DIR/XB_WEB_TOKEN` 指向 sandbox；真实 gateway(:18789/:3000) 全程只读。
+
+| 用例 | 结果 |
+|------|------|
+| GET /api/config/gateway（sandbox） | hash/valid/bindings/pluginLoadPaths/channels 切片正确 ✅ |
+| preview awada | patchMasked awadaKey=`****`、paths 去重追加、summary 3 条、baseHash 正确 ✅ |
+| apply awada（响应跑赢重启时序） | 200 `{ok:true,sentinel:{persisted:true,…}}`；文件落盘、.bak 生成 ✅ |
+| apply awada（重启掐断响应时序） | 文件已写 + .bak 已生成，退避复核后返回 `{ok:true,note:"…复核写盘成功…"}` ✅ |
+| preview feishu 2 账号 | appSecret 全 `****`、bindings 保留 openclaw-weixin ✅ |
+| apply feishu 后再 apply 少一个账号 | 残留账号被 null 删键清除（file 仅剩 main-bot）✅（修正前残留，修正后通过） |
+| apply 缺 allowFrom 意图声明 | 400 透传 gateway 报错（修正前）；声明后 200（修正后）✅ |
+| 浏览器 UI：kind=feishu → 填 2 账号 → 预览（打码回显）→ 确认写回 → 成功块 + sentinel JSON | 全链路 ✅ |
+| 浏览器 UI：手动重启按钮 | preflight `{safe:true,blockers:[]}` + accepted 回显 ✅ |
+| .bak 轮转 | openclaw.json.bak/.bak.1~.bak.4 多级轮转生效 ✅ |
+| 无/错令牌（GET 与 3 个 POST 均测） | 401 ✅ |
+| bad kind / 短 awadaKey / 非法 accountId | 400，错误消息明确 ✅ |
+| 真实 gateway 只读冒烟（:3000 GET /api/config/gateway） | hash 5b0be2f6…、channels=[openclaw-weixin]、bindings 1 条，与 sandbox 隔离可辨 ✅ |
+| tsc --noEmit / next lint | 0 错误 ✅ |
+
+**已知限制**：
+
+- apply 成功块的 restart 计划在"响应被重启截断"的时序下不可用（note 已注明），用户可从 /config 只读卡片与 gateway 日志确认实际状态
+- screenshots 自动化抓取失败（chrome-devtools take_screenshot 持续 -32603），UI 证据以 DOM 断言文本为准
+- feishu 账号除 allowFrom 外若存在模板外的数组字段（当前 schema 无），移除账号时 gateway 护栏将报 400 并透出具体路径——报错即修复路径，未做静默兜底
+- real gateway 的写操作未在真实配置上演练（按约定真实 `~/.openclaw` 零写入；首次真实绑定建议先 preview 打码回显人工确认）
