@@ -148,6 +148,7 @@ export class GatewayConnection {
       const handshakeTimer = setTimeout(() => {
         if (settled) return;
         settled = true;
+        console.error("[gateway] 握手 15s 超时（open/challenge/connect/hello-ok 卡在某一环）");
         ws.terminate();
         reject(new Error("gateway 握手超时（15s 内未完成 challenge→hello-ok）"));
       }, 15_000);
@@ -162,6 +163,7 @@ export class GatewayConnection {
 
       ws.on("open", () => {
         this.lastActivityAt = Date.now();
+        console.error("[gateway] ws open，等待 connect.challenge");
         // 服务器 open 后立即推 connect.challenge；等它拿到 nonce 再发 connect
       });
 
@@ -175,12 +177,14 @@ export class GatewayConnection {
         }
         if (frame.type === "event" && frame.event === "connect.challenge" && !settled) {
           const nonce = (frame.payload as { nonce?: string } | undefined)?.nonce ?? "";
+          console.error("[gateway] challenge 已收到，发送 connect");
           if (!nonce) {
             fail(new Error("gateway connect challenge 缺少 nonce"));
             ws.close(1008, "connect challenge missing nonce");
             return;
           }
-          ws.send(
+          try {
+            ws.send(
             JSON.stringify({
               type: "req",
               id: randomUUID(),
@@ -203,6 +207,10 @@ export class GatewayConnection {
               },
             }),
           );
+          } catch (sendErr) {
+            fail(sendErr instanceof Error ? sendErr : new Error("connect 帧发送失败"));
+            ws.terminate();
+          }
           return;
         }
         if (frame.type === "res") {
@@ -218,6 +226,21 @@ export class GatewayConnection {
             this.setState("ready");
             this.startWatchdog();
             resolve();
+            return;
+          }
+          // 握手期的错误 res（如 connect params 被拒）也要快速失败，
+          // 否则静默丢弃后会干等 15s 超时，真实报错被吞掉
+          if (!settled && !frame.ok) {
+            const err = frame.error;
+            fail(
+              new GatewayRequestError(
+                err?.code ?? "UNAVAILABLE",
+                `gateway 握手被拒：${err?.message ?? "unknown error"}`,
+                err?.details,
+                err?.retryable === true,
+              ),
+            );
+            ws.close(1008, "handshake rejected");
             return;
           }
           const entry = this.pending.get(frame.id);

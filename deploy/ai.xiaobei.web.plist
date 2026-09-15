@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.xiaobei.web</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/harvey/.local/bin/node</string>
+    <string>/Users/harvey/Documents/Qoder/projects/xiaobei-web/apps/web/node_modules/next/dist/bin/next</string>
+    <string>start</string>
+    <string>-H</string>
+    <string>127.0.0.1</string>
+    <string>-p</string>
+    <string>3000</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/harvey/Documents/Qoder/projects/xiaobei-web/apps/web</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/harvey/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/harvey/Library/Logs/xiaobei-web/out.log</string>
+  <key>StandardErrPath</key>
+  <string>/Users/harvey/Library/Logs/xiaobei-web/err.log</string>
+</dict>
+</plist>
