@@ -23,6 +23,7 @@ const NAV_GROUPS: Array<{
       { href: "/sessions", label: "会话" },
       { href: "/cron", label: "定时任务" },
       { href: "/media", label: "媒体" },
+      { href: "/logins", label: "登录态" },
       { href: "/config", label: "配置总览" },
     ],
   },

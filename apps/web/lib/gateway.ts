@@ -364,9 +364,12 @@ export function getGatewayConnection(): GatewayConnection {
   return globalForGateway.__gatewayConn;
 }
 
-// web 聊天专用 sessionKey 前缀，隔离微信等其他 channel 会话
+// web 聊天 sessionKey：裸 web:<uuid>（自由对话）与 agent:<agentId>:web:<uuid>
+// （Phase 4 快捷指令直达会话，T1 实证与裸 web: 互不相通）。两类都在本 BFF 白名单内，
+// 渠道会话（微信等）不匹配、不可经 web 访问
 export function isValidWebSessionKey(sessionKey: string): boolean {
-  return /^web:[A-Za-z0-9-]{8,64}$/.test(sessionKey);
+  if (/^web:[A-Za-z0-9-]{8,64}$/.test(sessionKey)) return true;
+  return /^agent:[a-z0-9-]{1,64}:web:[A-Za-z0-9-]{8,64}$/.test(sessionKey);
 }
 
 export function messageTextOf(message: GatewayMessage | null | undefined): string {

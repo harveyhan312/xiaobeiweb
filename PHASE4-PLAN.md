@@ -1,6 +1,6 @@
 # Phase 4 计划：能力覆盖（快捷指令库 + 登录态监控）
 
-> 日期：2026-09-15。状态：**待第三方审核**（审核通过后实施）。
+> 日期：2026-09-15。状态：**审核通过（§五 P1–P5 修订纳入，见 §12）并已实施**。
 > 前置：Phase 1–3 已完成并过审（DEVELOPMENT-LOG.md）；本机生产部署完成（XIAOBEI-WEB-DEPLOY-LOG.md）。
 > 与原 build plan（docs/2026-09-08_xiaobei-web-console-build-plan.md，在 xiaobei 仓）的关系：原计划 Phase 4 = SaaS 多租户，顺延为 Phase 5。
 
@@ -185,3 +185,22 @@ xiaobei 能力图谱（§1，事实）
 3. prompt 模板进 git 的可审形态（静态 TS 常量 vs JSON）
 4. 指令目录 v1 清单取舍（§7.1）是否符合产品优先级
 5. 多会话 UI 对既有 chat 页的改造边界（回归风险）
+
+---
+
+## 12. 修订记录（2026-09-15 审核后，AUDIT-REPORT §五 P1–P8）
+
+审核结论：决策链/技术地基/红线全过；P1–P5 纳入本阶段，P6–P8 为实施细节。开发侧先实施 T1–T6 后收到审核意见，修订以增量方式落实。产品主理人已确认三项决策：P1 降级项、it-engineer 处置、P2 数据源。
+
+| 审核项 | 修订 | 状态 |
+|--------|------|------|
+| P1 [高] 长程产物无完成反馈 | 目录条目增 `observationPage`；发送成功回执渲染「产物可在 <页> 查看 →」直达链接 + agent 节奏提示。**sessionKey 过滤高亮降级 backlog**（需改 published-track SQLite schema，违反零直改精神，主理人确认） | 已实施 |
+| P1 v2 路径（T1 补掘） | gateway 广播 `sessions.changed`（`session-change-event.ts`，载荷含 sessionKey/hasActiveRun/activeRunIds/ts），SSE 完成提醒可行，留 v2 | 已掘取 |
+| P2 [高] 指令历史错抽象 | 聊天页顶部「会话 / 指令记录」双 Tab；指令记录 = commandId/label/时间/状态/进入会话入口。数据源 **localStorage**（主理人确认；跨设备一致需引擎侧支持，v2；sessions.list 兜底不丢会话） | 已实施 |
+| P3 [中] disabled-agent 前置门控 | 指令面板拉 `/api/config/crews`，目标 agent 停用卡片置灰 + 「需先启用」跳 /config | 已实施 |
+| P4 [中] 登录态缺动作闭环 | 新增目录条目 `relogin`（→main，login-manager 有头重登，平台 choice 限其管辖的 4 平台）；/logins 临期/已过期卡片带「委托重新登录」按钮，经 /api/chat/command 全套白名单；xhs-publish/wx_mp 卡片提示联系小贝处理 | 已实施 |
+| P5 [中] 参数表单无规范 | param 增 `description`（help text）/`placeholder`/`defaultValue`；UI 渲染 help text + 内联必填提示；服务端白名单校验不变 | 已实施 |
+| P6 [低] 回归边界 | T3 已一次性实施，单会话回归用例（自由对话发送/历史恢复/SSE 绑定/中止归属）在 T6 全过 | 已覆盖 |
+| P7 [低] cron 非确定性 | cron-create 描述与回执注明「需到 /cron 核对调度」，回执直达 /cron | 已实施 |
+| P8 [低] 预览确定性错觉 | 预览区加注「将以此委托 agent，实际执行由 agent 判断」 | 已实施 |
+| §10.5 it-engineer | **保留** sys-diagnose（主理人确认），模板强化为「只读巡检诊断，任何写/重启/配置变更须先征得用户同意」，满足审核 §3 开放条件 | 已实施 |

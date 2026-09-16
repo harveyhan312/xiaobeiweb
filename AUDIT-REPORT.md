@@ -224,3 +224,92 @@ Phase 2 红线全绿，双零静态检查，4 条发现均低/信息级无阻塞
 Phase 3 是立项目标中风险最高的阶段（首次开写面），但红线守住：`openclaw.json` 全程经 gateway `config.patch` 护栏、真实 `~/.openclaw` 零写入、域写回经 execFile 脚本白名单、17 路由鉴权全覆盖、命令注入双白名单。tsc/eslint 双零。仅 F15/F16 两处低危纵深防御 + 2 信息项，无阻塞。修完可视为 Phase 3 收尾。
 
 *Phase 3 复核员备注：脚本信任边界处理得很好——execFile 无 shell + 路由/写层双重白名单是教科书级纵深防御；config 写回复用 gateway 原生 `config.patch` 护栏（而非自研写盘）是正确选型，把 schema/并发/.bak/重启都甩给引擎。最大残余风险是 F17 的数组合并语义依赖，sandbox 已证但真实环境未演练——首次真实写操作务必 preview。整体可推进。*
+
+---
+
+## 五、Phase 4 计划审核（功能逻辑 / 好用性视角）
+
+> 审核对象：`PHASE4-PLAN.md`（计划文件，非源码）。审核重点：**功能逻辑与好用性**（用户明确要求"功能方便好用"）。技术红线为辅。
+> 审核员：Claude（第三方）。日期：2026-09-15。
+
+### 1. 决策链核验（§1–§4）：成立 ✅
+- §1 能力图谱（13 域）与 §2 web 现状盘点（13 页/18 API）事实准确，与代码现状吻合。
+- §3 覆盖矩阵 ✅/◐/❌ 三档判定成立（对话✅全功能、渠道◐仅 awada/feishu、内容生产/发布◐观测有发起无、登录态❌完全不可见、多租户❌未启动）。
+- §4 优先级推导无跳步：缺口 1（执行类发起入口）覆盖 5 域、缺口 2（登录态）属"断链风险"、SaaS 顺延 Phase 5。可检验依据自洽。
+- 一处可商榷：把"定时任务创建"归入缺口 1 用指令库解，但 NL→cron 非确定性强（见 P7），效果存疑——建议仍可入此阶段但加"强制 /cron 确认"闭环，或降级 backlog。
+
+### 2. 技术地基：已验证 ✅
+§6A 的核心主张——`agent:<agentId>:web:<uuid>` 直达目标 agent + agentId 与 sessionKey 一致性校验 + agents.list 存在性校验 + 未存在报错路径——已对照引擎源码逐条核实：
+
+- `src/sessions/session-key-utils.ts`：`agent:` 前缀路由 scopedRe，`agent:<id>:` 结构性头部匹配，直达到对应 agent 会话空间 ✅
+- `src/gateway/server-methods/chat.ts`：agentId 必须与 sessionKey 内嵌 agentId 一致（不一致即报 "agentId does not match session key"）✅
+- `ChatSendParamsSchema`：agentId 为可选 NonEmptyString ✅
+- agents.list 存在性校验存在，未存在报 "Agent no longer exists" ✅
+
+**结论：快捷指令路由零网关改动，技术可行。** §6A 的可行性证据属实，是本计划最关键的承重墙，已验。
+
+### 3. §8 红线：两条新增红线充分 ✅
+- **cookie 值绝不回显**：API 与 UI 只出元数据（name 存在性/expires/updated_at），绝不返回 cookie value——设计到位，与风控要害匹配。
+- **sales-cs 不受 web 直发指令**：sales-cs 是对外 crew，targetAgentId 白名单 `{main, content-producer, it-engineer}` 服务端校验——隔离对外 crew 合理。
+- **补一条建议**：it-engineer 直发指令（§10.5 开放项）若开放，应限定为"只读诊断"类指令（不触发写/重启），与 P3-E it-engineer 受保护语义一致；否则把白名单收紧为 `{main, content-producer}` 更稳。
+
+### 4. 功能逻辑 / 好用性问题（P1–P8，按影响排序）
+
+#### P1 · [高] 长程产物无完成反馈闭环——"发起→观测"断链
+- **现象**：指令发给 content-producer（视频 14 阶段，可跑数十分钟到数小时）。SSE 只覆盖 agent 单轮文本回执（"好的，开始做"），agent 异步产物完成不会推送给 web。用户只能手动刷 `/videos`。
+- **影响**：这是"发起类"功能最易踩的坑，与"好用"目标直接冲突——用户发完指令不知道什么时候去看结果、去哪看。
+- **建议**：① 发送成功回执里给"去 /videos 查看"直达链接，带 `sessionKey` 过滤定位本次指令产出的新增项；② `/videos` 按 sessionKey/指令关联，新项高亮；③ v2：gateway 有 `task`/`sessions.changed`/`session.operation` 事件（协议 §10），可经 BFF SSE 推完成提醒（需 T1 掘取确认事件形态）。
+
+#### P2 · [高] 用"会话列表"承载指令结果是错抽象
+- **现象**：一次 content-producer 指令 = 一个 `agent:content-producer:web:<uuid>` 会话。下 3 条指令 = 3 个会话散落。用户心智模型是"我下了什么指令/结果如何"，不是"我和 content-producer 的第 N 个会话"。T3 用"会话列表/切换"承载指令结果，抽象错位。
+- **影响**：用户找回指令产物困难，指令库价值打折扣。
+- **建议**：顶层做**指令历史**视图（commandId/label/状态/产物直达链接/时间），底层才是会话。T3 别只做"会话列表/切换"。会话切换退为指令历史点击进入的二级视图。
+
+#### P3 · [中] 指令卡无 disabled-agent 前置门控
+- **现象**：content-producer 停用时，用户填完参数点发送才报错"Agent no longer exists"。坏 UX——前置已知状态没体现在卡片上。
+- **建议**：卡片读 `/api/config/crews` 状态，目标 agent 停用时卡片置灰 + "需先启用"提示（可一键跳 `/config` 启用后再发）。§6A 已提"目标未启用的报错路径"在 T1 验证，但缺 UX 前置门控设计。
+
+#### P4 · [中] 登录态只监控不修复——缺动作闭环
+- **现象**：`/logins` 显示"douyin 临期 3 天"但页内无"重新登录"动作（re-login 是 agent 的 login-manager 动作）。监控到一个问题却不能在原地解决。
+- **建议**：与指令库联动——临期/已过期卡片带"委托重新登录"按钮（POST /api/chat/command，commandId=login-manager 重登指令，targetAgentId=main）。既补闭环，又示范指令库价值，两个 feature 互相成就。
+
+#### P5 · [中] 参数表单未定可用性规范
+- **现象**：计划 §7.1 params 只有 `{key, label, type, required, options?}`，没提 placeholder / help text / 默认值 / 内联校验 / 错误文案。12–16 条指令的填参体验会参差。
+- **建议**：补参数设计规范——每 param 增 `description`（作 help text）+ `placeholder` + `defaultValue` + 校验失败的内联提示。
+
+#### P6 · [低] 多会话改造对既有 chat 页的回归边界不清
+- **现象**：§10.5/T3 改造既有 chat 页支持多会话。当前 chat 页单 sessionKey（localStorage）。加多会话涉及历史恢复 / SSE 绑定 / 中止按钮 runId 归属，回归风险。
+- **建议**：T3 拆"会话切换骨架"（T3a）与"指令卡"（T3b）两步，先保单会话回归不破；会话切换明确交互（未读标记、流式中会话标识）。
+
+#### P7 · [低] cron 创建指令非确定性
+- **现象**：系统类指令"自然语言描述→agent 调 cron tool"——用户无法在创建前核对解析出的 schedule，可能建错。
+- **建议**：该指令发送后引导去 `/cron` 核对新建任务（闭环链接），文案注明"需到 /cron 确认调度"；或干脆降级 backlog（与 §4 可商榷项呼应）。
+
+#### P8 · [低] prompt 预览的确定性错觉
+- **现象**：预览给用户"将精确执行此 prompt"的暗示，但 agent 可能改写/路由。
+- **建议**：预览文案标注"将以此委托 agent，实际执行由 agent 判断"。
+
+### 5. 结论
+计划决策链扎实、技术地基（§6A）已对照引擎源码验证、红线设计到位。但**好用性有三个硬缺口**：
+
+1. 长程产物无完成反馈（P1）——发完不知道去哪看结果
+2. 指令历史错抽象成会话列表（P2）——找回指令产物困难
+3. 监控页缺动作闭环（P4）——登录态问题不能原地解决
+
+**建议把 P1–P5 纳入本阶段范围**（P1/P2/P3 影响指令库核心体验，P4/P5 是登录态/表单的基础可用性），P6–P8 作为实施细节落实。仅按现计划实施，"快捷指令库"会变成"发完就丢、用户不知道结果去哪看"的半成品。
+
+### 6. 修订任务条目建议（供开发 agent 直接改 PHASE4-PLAN.md §9）
+
+> 基于上方 P1–P5，给出可落地的 T1–T5 修订。T6/T7 不变。
+
+- **T1（补充）**：掘取时增加"gateway 是否有 task/sessions.changed/session.operation 完成事件可用于 SSE 推送"的结论（为 P1 v2 铺路，非阻塞本阶段）。
+- **T2（修订）**：指令目录 + BFF。catalog 条目结构增 `description`（卡片副标题/help text）；每 param 增 `placeholder`/`helpText`/`defaultValue` 字段（P5）；POST /api/chat/command 成功响应回带 `{sessionKey, commandId, observationHint: {page: "/videos"|..., filter: {sessionKey}}}` 供前端做"去观测"直达链接（P1）；targetAgentId 白名单 `{main, content-producer, it-engineer}` 服务端校验（§8 复述）。
+- **T3（修订，拆两步）**：
+  - T3a 会话切换骨架（保单会话回归不破，先验历史恢复/SSE 绑定/中止 runId 归属）（P6）
+  - T3b 指令卡 UI：分组卡 → 参数表单（含 placeholder/helpText/内联校验）→ prompt 预览（文案标注"委托 agent，实际执行由 agent 判断"，P8）→ 发送。卡片读 `/api/config/crews` 状态做 disabled-agent 前置门控（置灰 + "需先启用"跳 /config）（P3）。**新增顶层"指令历史"视图**：commandId/label/状态/产物直达链接/时间，底层才是会话（P2）。发送成功回执渲染"去 /videos 查看"直达链接，带 sessionKey 过滤定位新增项（P1）。
+- **T5（修订）**：/logins 页 UI——平台卡片 + 预警汇总条（可点击跳平台卡）+ 五状态渲染；**临期/已过期卡片带"委托重新登录"按钮**（POST /api/chat/command，commandId=login-manager 重登指令，targetAgentId=main），实现监控→动作闭环（P4）。
+
+### 7. 验证方式
+- 人工核对 P1–P8 每条都有"问题 + 建议"两要素
+- 修订任务条目可被开发 agent 直接映射到 PHASE4-PLAN.md §9 的编辑动作
+- 实施后由审核员复审改动点（P1/P2/P3 改 T2/T3，P4 改 T5）

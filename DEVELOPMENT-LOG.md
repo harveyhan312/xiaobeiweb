@@ -464,3 +464,116 @@ Deviation 共 3 处，均已记录：写回统一走 gateway config.patch RPC（
 **F18（记录，不修）**：gateway 重启竞态的"失败后复核判成功"兜底，在极端并发外部变更下可能误报成功；属必要启发式，可接受。
 
 **回归**：`tsc --noEmit` 0 error、`eslint`（含两改动文件单检）0 error/0 warning；:3000 dev server 热更新后以上用例实测通过。
+
+## 2026-09-15 · Phase 4 T1：路由实证 + 会话枚举掘取（审核并行期前置实施）
+
+计划待审核期间先行 T1（纯事实掘取，不受审核结论影响）。方法：throwaway sandbox gateway 复跑（`/tmp/xb-p3d-sandbox`，`OPENCLAW_STATE_DIR=/tmp/xb-p3d-sandbox ~/xiaobei/bin/openclaw gateway --port 18795`，sandbox 假令牌/假 AWK_API_KEY，真实 `~/.openclaw` 零接触）+ 引擎源码掘取（`~/xiaobei/openclaw/src`）。
+
+**源码掘取结论（证据：引擎仓路径:行号）**：
+
+1. **会话枚举 RPC = `sessions.list`**（`src/gateway/server-methods/sessions.ts:770-867`，scope `operator.read`，`core-descriptors.ts:155`）。参数含 `limit/offset/agentId/includeLastMessage` 等；排序 pinnedAt→updatedAt→key 稳定分页（`session-utils.ts:2626-2639`，默认 limit=100）。**行类型无独立 agentId 字段，agent 归属编码在 `key`**：agent 前缀 key 原样返回，裸 `web:<uuid>` 被规范化为 `agent:<defaultAgent>:web:<uuid>`（`session-store-key.ts:74-111`）——即多会话列表一次 `sessions.list` 即可覆盖新旧两类会话，无需合并两源。
+2. **历史读取 = `chat.history`**（params `logs-chat.ts:30-39`：sessionKey + 可选 agentId + limit≤1000）。agent: 前缀与普通 web: 会话走完全相同路径（`chat.ts:3122-3300` 直接 loadSessionEntry），BFF 无需区分。
+3. **chat.send** 需 `operator.write`（`core-descriptors.ts:231`）；agent 解析顺序 = 显式 agentId ?? key 前缀 ?? default（`agent-scope.ts:300-330`）；不走 bindings（`chat.ts` 无 binding 查询）。
+4. **首个 send 副作用**：admission 用 clientRunId 兜底为 sessionId，run 启动时在**该 agent 独立 store** 建 entry+transcript，随后 `sessions.changed` 广播（`chat.ts:4061,4138,762-766`）。
+5. **connect scopes**：BFF 需在既有连接上追加 `operator.write`（P3-D 已有 read/admin）。
+
+**sandbox 实测（探针脚本 `/tmp/xb-p3d-sandbox/t1-route-probe.mjs`，WS 直连 :18795）**：
+
+| 用例 | 结果 |
+|------|------|
+| A `agent:content-producer:web:<uuid>` + agentId=content-producer + 幂等键 | 200 `{runId,status:"started"}` ✅ |
+| B agentId=main 搭配 content-producer key | 400 `agentId "main" does not match session key "agent:content-producer:web:…"` ✅ |
+| C `agent:nonexistent-agent` + agentId 同名 | 400 `Unknown agent id "nonexistent-agent"` ✅ |
+| D 不传 agentId，仅 key 前缀 | 200 runId；sessions.list 确认会话落在 content-producer ✅ |
+| E sessions.list | agent 前缀 key 原样可见（kind=direct），两新会话均出现 ✅ |
+| F chat.history（agent 前缀 key + agentId） | 数组返回，含 user 消息回显 ✅ |
+| G 同幂等键重发 | 返回与首次相同 runId（幂等）✅ |
+
+**对 §6A 计划前提的修正/确认**：
+- 确认：agent 前缀 sessionKey 直达 agent、零网关改动；报错文案与计划引用一致（"Unknown agent id" 而非 "no longer exists"——后者仅 agent 运行中被删除的路径，`chat.ts:3850-3863`）。
+- 确认：`agent:x:web:` 与 `web:` 是不同会话空间；但因 sessions.list 已把裸 `web:` 规范化为 `agent:main:web:`，**T3 多会话 UI 可用单一 sessions.list 数据源**，计划 §10.1 的"合并展示两源"担忧解除。
+- 新注意点：既有聊天页若用裸 `web:<uuid>`，切到 sessions.list 数据源后 key 形态会变为 canonical `agent:main:web:<uuid>`——T3 需统一改用 canonical key 或保持浏览器侧生成形态不变（实现时定夺，注意 chat.send/chat.history 传 key 的形态一致性）。
+
+## 2026-09-15 · Phase 4 T2–T6：快捷指令库 + 登录态监控（实施与验证）
+
+**改动清单**：`lib/command-catalog.ts`（新增，13 条指令静态目录）、`lib/command-rpc.ts`（新增，参数校验+服务端渲染）、`app/api/chat/commands/route.ts`（新增，目录元数据）、`app/api/chat/command/route.ts`（新增，dryRun 预览 + 发送）、`app/api/chat/sessions/route.ts`（新增，会话列表）、`lib/xiaobei-logins.ts`（新增，登录态只读层）、`app/api/logins/route.ts`（新增）、`app/(console)/logins/page.tsx`（新增）、`app/page.tsx`（重写：侧栏多会话 + 指令面板）、`lib/gateway.ts`（sessionKey 校验扩展）、`app/(console)/layout.tsx`（导航 + 登录态）。全部挂 checkApiAuth。
+
+**红线落实**：
+- prompt 组装只在 BFF：浏览器仅上送 `{commandId, params}`；`GET /api/chat/commands` 剥离 promptTemplate（实测响应无模板文本）；UI 预览经 `dryRun` 服务端渲染回显
+- 目标 agent 白名单 {main, content-producer, it-engineer}，服务端校验；目录无 sales-cs 条目
+- 登录态只读元数据（cookie name 存在性/expires/updated_at），实测响应无任何 cookie value
+- 会话键校验扩展仅放行 `web:<uuid>` 与 `agent:<id>:web:<uuid>`；渠道会话键（weixin: 等）仍 400 拒绝
+- 零直改 openclaw.json；真实 ~/.openclaw 零写入（logins/ 只读；指令仅经 chat.send 进 sandbox agent 会话）
+
+**偏离计划记录**：
+1. §7.2 原定 execFile 调 `check-login.ts --no-ping`，改为 BFF 本地 Tier1 判定：其依赖 `_shared/check-session.ts` 将 SESSIONS_DIR 写死 `~/.openclaw/logins`（不认 OPENCLAW_STATE_DIR，sandbox 夹具无法驱动），且零子进程更简、更安全；必需 cookie 键表逐字取自引擎侧源码（check-session.ts presenceCheck + creator-session.ts CREATOR_SESSION_KEYS）并在注释注明出处。drift 风险 = 平台键表变更时两处需同步。
+2. 指令会话 sessionKey 由服务端生成（计划未明确归属）；浏览器不掌握形态，发送后随响应回传供 UI 切换。
+3. `sys-diagnose`（→it-engineer）已入目录并实测可用，但按 §10.5 保留"审核定夺后可一行移除"状态。
+
+**验证证据（throwaway sandbox：gateway :18795 + dev server :3005，OPENCLAW_STATE_DIR 指夹具/sandbox）**：
+
+| 用例 | 结果 |
+|------|------|
+| T1 路由 7 用例（见上节） | 全过 ✅ |
+| 指令 API：401（无令牌）/ 400（未知 commandId、缺必填参数、`{{goal}}` 注入、choice 非法值、未声明参数键、缺幂等键） | 全部正确 ✅ |
+| 合法发送 main（bd-intel-brief）→ `agent:main:web:<uuid>` | 200 runId ✅ |
+| 合法发送 content-producer（video-full）→ `agent:content-producer:web:<uuid>` | 200 runId ✅ |
+| 同幂等键重发 | 同 runId ✅ |
+| chat.history 验 transcript | 渲染后 prompt（含 `（未提供）` 替换）落入正确 agent 会话 ✅ |
+| GET /api/chat/commands | 13 条、按组 5/3/2/1/2、模板零泄露 ✅ |
+| GET /api/chat/sessions | web 会话 4 条（含 agent 前缀 key + derivedTitle），渠道会话不外泄 ✅ |
+| dryRun 预览（cron-create） | 渲染回显正确、不发 send ✅ |
+| 浏览器全链路：指令面板 → 选"商业情报简报" → 填参 → 预览 → 发送委托 | 面板关闭、切至新 agent 会话、用户气泡=确认 prompt、SSE 流式事件到达（sandbox 假 key 模型报错属预期）、侧栏新增会话 ✅ |
+| 浏览器：会话切换 + 历史加载（content-producer 会话） | transcript 渲染正确 ✅ |
+| 浏览器：自由对话回归（新 web: 会话发送） | 用户气泡 + 事件通道正常 ✅ |
+| /api/logins：401 / 夹具五状态（valid/expiring/expired/not-logged-in/no-data）/ 空目录全 no-data | 全过 ✅ |
+| /logins 页 DOM 断言：6 平台卡、五状态徽标、预警条/无预警条、零 cookie 值 | 全过 ✅ |
+| 全路由 401 矩阵（21 条） | 全 401 ✅ |
+| 带令牌 200/400 抽样（含渠道 key 400） | 全过 ✅ |
+| 13 个页面渲染 | 全 200 ✅ |
+| tsc --noEmit / eslint . | 0 错误 0 警告 ✅ |
+
+**已知限制**：
+- 会话流式订阅按当前激活会话绑定：切走再切回时，后台会话的中间流不回放，历史重新加载补齐终态（v1 接受）
+- 登录态预警两类误差照计划 §6B/§10.3（expires≤0 会话 cookie 无法预警、服务端提前失效需 pong，v2）
+- xhs-publish/wx_mp 无 Tier1 键表公开约定：wx_mp 按文件存在+含 cookie 判定，xhs-publish 按创作者会话键 any-of 判定
+- 空 web: 会话无服务端条目，不出现在会话列表；激活时由前端补位显示
+- sandbox 模型调用全程假 AWK_API_KEY：流式通道以 error 事件验证，真实模型出字由生产网关既有链路保证（Phase 1 已验）
+
+**待审核定夺**：§10.5 sys-diagnose（it-engineer）开放与否；指令目录取舍（§11.4）。
+
+## 2026-09-15 · Phase 4 R1–R5：审核修订（P1–P8）实施
+
+审核结论（AUDIT-REPORT.md §五）与用户三项定夺落地：P1 观测直达链接（sessionKey 过滤高亮入 backlog，不改 SQLite schema）；P2 指令记录 localStorage（用户确认）；it-engineer sys-diagnose 保留 + 只读强化（用户确认）。计划文档同步：PHASE4-PLAN.md 状态头 + 新增 §12 修订映射表。
+
+**改动清单**：
+
+| 审核项 | 改动 | 文件 |
+|--------|------|------|
+| P1 发起→观测断链 | POST /api/chat/command 成功响应增 `observationHint: {page, filter:{sessionKey}}`；面板发送后切**回执态**（不再直接关闭）：直达"去 {page} 查看 →"链接 + "留在会话" | command-rpc.ts / api/chat/command/route.ts / app/page.tsx |
+| P2 会话列表错抽象 | 侧栏拆 **会话 / 指令记录** 双 Tab；指令记录=顶层视图（label/时间/进入会话/去X查看），localStorage `xiaobei-web:command-history`（上限 100）；chat 页与 /logins 两个入口都写入 | app/page.tsx / logins/ReloginAction.tsx |
+| P3 disabled-agent 前置门控 | 打开面板即拉 /api/config/crews，目标 agent 停用→卡片置灰 + "需先到配置总览启用"（跳 /config） | app/page.tsx |
+| P4 监控无动作闭环 | /logins 临期/已过期/未登录卡片增**委托重新登录**按钮（client island ReloginAction，POST relogin 指令 → main）；发送成功显示"查看会话 →"深链；非管辖平台（xhs-publish/公众号）显示"请与小贝对话处理" | logins/ReloginAction.tsx（新）/ logins/page.tsx |
+| P5 参数可用性规范 | catalog param 增 `description`/`placeholder`/`defaultValue`；表单渲染 help text + placeholder + 必填内联"该项为必填"红框；预览按钮必填未填时禁用（文案"预览（必填项未填）"）；点卡片 defaultValue 预填 | command-catalog.ts / app/page.tsx |
+| P7 cron 非确定性 | cron-create 卡片描述明示"发送后请到定时任务页核对调度"（observationPage=/cron 兜底链接） | command-catalog.ts |
+| P8 预览确定性错觉 | 预览 prompt 下方固定文案"将以此委托 agent，实际执行方式由 agent 判断" | app/page.tsx |
+| §3 建议采纳 | sys-diagnose 模板强化为只读巡检："任何写入、重启、凭证 / 配置变更动作，先征得我同意再执行" | command-catalog.ts |
+| 深链支撑 | chat 页支持 `/?session=<key>` 直达指定会话（/logins 回链用）；URL 键优先于 localStorage 并回写 | app/page.tsx |
+
+**回归证据（sandbox gateway :18795 + dev :3005，夹具 OPENCLAW_STATE_DIR，真实 ~/.openclaw 零接触）**：
+
+| 用例 | 结果 |
+|------|------|
+| /logins：预警条 + 3 张预警卡（B站临期/快手过期/小红书未登录）带按钮，抖音/公众号/小红书创作无按钮 | ✅ |
+| 委托重新登录（快手）→ 200 → 卡片切确认态 + "查看会话 →"（`/?session=agent:main:web:<uuid>`） | ✅ |
+| 深链落会话：chat 页直达 relogin 会话，头部"快捷指令会话"徽标，侧栏会话列表置顶 | ✅ |
+| 指令记录 Tab：chat 页发送 + /logins 按钮两入口均写入，条目含 label/时间/进入会话/去X查看 | ✅（修复：ReloginAction 初版漏写历史，回归时发现并补） |
+| 指令面板：14 条按 5 组渲染、description 副标题、必填红星 | ✅ |
+| 表单内联校验：必填空→红框+"该项为必填"+预览禁用；defaultValue（目标时长）预填；help text/placeholder 渲染 | ✅ |
+| 预览→P8 文案→发送委托→回执态"去 /videos 查看 →" | ✅ |
+| sandbox 模型报错（假 key）属预期，与 T6 一致 | ✅ |
+| tsc --noEmit / eslint（全部改动文件） | 0 错误 0 警告 ✅ |
+
+**未浏览器实测项**：disabled-agent 门控的置灰分支（sandbox 三 agent 全启用；代码路径 `enabledAgents.includes` 已覆盖，留生产启用/停用切换时目检）。
+
+**红线复核**：模板仍零进前端（GET /api/chat/commands 仅元数据）；cookie 值零回显（回归快照仅 cookieNames）；targetAgentId 白名单服务端校验未动；/logins 页新增组件不触碰 cookie 内容。
