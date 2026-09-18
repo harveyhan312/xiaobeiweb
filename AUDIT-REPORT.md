@@ -313,3 +313,99 @@ Phase 3 是立项目标中风险最高的阶段（首次开写面），但红线
 - 人工核对 P1–P8 每条都有"问题 + 建议"两要素
 - 修订任务条目可被开发 agent 直接映射到 PHASE4-PLAN.md §9 的编辑动作
 - 实施后由审核员复审改动点（P1/P2/P3 改 T2/T3，P4 改 T5）
+
+---
+
+## 六、Phase 4.5 计划审核（体验闭环：完成推送 + 登录态探活）
+
+> 审核对象：`PHASE4.5-PLAN.md`（计划文件）。审核重点：**功能逻辑与好用性**（沿用 §五口径）。本阶段是 Phase 4 遗留断链（P1 完成推送 + 登录态探活盲区）的收口。
+> 审核员：Claude（第三方）。日期：2026-09-16。
+
+### 1. 技术地基：已对照引擎源码全量验证 ✅
+§2 "已证实"三项逐条核实（引擎仓 `~/xiaobei/openclaw`）：
+
+| 计划声明 | 引擎证据 | 判定 |
+|---------|---------|------|
+| gateway 广播 `sessions.changed` | `src/gateway/server-methods/session-change-event.ts`（`emitSessionsChanged`）；`server-broadcast.ts:48` `"sessions.changed": [READ_SCOPE]` | ✅ |
+| 载荷含 `{sessionKey, agentId, reason, hasActiveRun, activeRunIds, ts}` | `SessionChangedPayload={sessionKey?,agentId?,reason,compacted?}` + 广播时 `buildGatewaySessionEventFields`/`buildSessionEventSnapshot` 注入 `hasActiveRun/activeRunIds`（`server-chat.ts:459`）+ `ts:Date.now()` | ✅ 字段全在 |
+| 完成沿可行（run 结束 → hasActiveRun=false 广播） | `server-chat.ts:731-740` `broadcastSessionChange` 在 chat 生命周期 phase 翻转时广播，snapshot 经 `:459` 带 `hasActiveRun: activeRunState.active` | ✅ 可行（时序仍需 sandbox 实抓确认） |
+| scope 足够，无需改握手 | `READ_SCOPE` 由 BFF 既有 `operator.read` 覆盖（Phase 1 scopes） | ✅ **T1.2 可降级为确认项** |
+| BFF 帧只分发 chat 事件，需扩展 | `apps/web/lib/gateway.ts:265` `frame.event === "chat"` 唯一分支 | ✅ |
+| 渠道会话可服务端过滤 | `isValidWebSessionKey`（`gateway.ts:370`）匹配 `^web:` + `^agent:<id>:web:`，渠道会话（`agent:*:awada:*`/feishu）不匹配 | ✅ 红线可执行 |
+
+**结论：完成推送技术地基成立。** §2 事实准确，T1 掘取问题问对了关键。可回填：T1.2（scopes）已确认无需改握手；T1.1 feasibility 已确认，留 sandbox 实抓时序；T1.3（OFB_KEY/pong）仍未掘取，是 T3 选型的唯一阻塞项，应优先。
+
+### 2. §4 红线：到位 ✅
+- 新路由鉴权、通知只元数据不含消息内容、渠道会话 BFF 服务端过滤、cookie 零回显、零直改——设计到位。`isValidWebSessionKey` 已能执行"渠道会话永不出 BFF"。
+- 补一条：sessions-events SSE 转发的 `hasActiveRun`/`activeRunIds` 为布尔+runId，不含会话内容，安全 ✅（已核）。
+
+### 3. 功能逻辑 / 好用性问题（Q1–Q6，按影响排序）
+
+#### Q1 · [高] NotificationBell 挂载位置与"全页面可见"目标矛盾
+- **现象**：§3.1 称铃铛挂 `console/layout.tsx`、"全页面可见（不止 chat 页）"。但 `app/page.tsx`（聊天/指令页）在根 layout，**不在 `app/(console)/` 分组**（已核目录结构）。挂 console layout → 指令页本身看不到铃铛——而指令页正是发指令的地方，用户发完切到别的页才看到铃铛，反了。
+- **建议**：挂根 `app/layout.tsx`（chat + console 均覆盖），或两个 layout 都挂。否则 P1 闭环在最关键的页面缺位。
+
+#### Q2 · [高] 完成沿无法区分"成功/失败/中止"——"已完成"误导
+- **现象**：§3.1 完成判定只看 `hasActiveRun` true→false 翻转；指令记录仅"进行中/已完成"两态（line 58）。run 失败/中止也是 false 沿 → 失败的视频委托也显示绿色"已完成"，用户被误导去 /videos 找不存在的产物。
+- **证据**：引擎 chat-lifecycle 广播带 `phase`/`runId`（`server-chat.ts:731-740`），且 chat 事件流有 `chat.final`/`chat.error`/`chat.aborted`——可取 outcome。
+- **建议**：指令记录三态"进行中 / 已完成 / 已出错（红）"；铃铛条目带状态色。数据源：完成沿触发时对该 sessionKey 拉一次 `chat.history` 取末条 outcome 枚举（不取消息内容，只取状态）。这把 Q2 与"通知只元数据"红线对齐。
+
+#### Q3 · [中] 离线期间完成的指令无任何通知痕迹
+- **现象**：§3.1 初始校准明确"不补弹"防堆积（line 56）。但用户关页 → run 完成 → 重开：指令记录 Tab 会经 sessions.list 校准为"已完成"（line 58），铃铛却不显示。用户若不点指令记录 Tab 就完全错过。
+- **建议**：重开页面时对名册内"上次访问时间戳之后完成"的条目，铃铛显示**静默未读角标**（不弹窗、不响），用 `notif-read` 时间戳与会话完成 `ts` 比较。一次一次性补，不堆积。
+
+#### Q4 · [中] T3 探活若只能走 agent 指令路径，盲区只关一半
+- **现象**：§3.2 探活路径二选一：execFile（若 OFB_KEY 可外调）或经 `/api/chat/command` 发 relogin 指令 → main（agent-path）。若 agent-path-only，探活=一次 agent run，成本/延迟同聊天一轮，**不适合"进页面自动探测预警平台"**。则第六状态只在用户手动点"探测"时显现——用户不主动怀疑，本地"有效"实为失效的盲区仍在。
+- **建议**：T1 先定 OFB_KEY 可达性（最关键掘取项）。若 agent-path-only，T3 明确只做"手动探测 + 显著引导文案"（卡片直接显示"本地判定有效，但服务端可能已失效，点此探测"），不承诺自动探测；风控闭环的诚实边界写进 DEVELOPMENT-LOG。
+
+#### Q5 · [低] 多标签页"不跨页同步"框架描述不准
+- **现象**：§3.1 称"每标签独立 SSE，通知不跨页同步"。但 `notif-read` 存 localStorage（**跨标签共享**）。实际是数据共享、无 live propagation——A 标签已读，B 标签角标不衰减直到刷新。
+- **建议**：要么承认"v1 接受不同步"，要么加 `window.addEventListener('storage')` 廉价跨标签同步已读/未读数（改动量极小，体验提升明显）。
+
+#### Q6 · [低] 兜底轮询仅铃铛打开时——漏发场景静默
+- **现象**：§6 兜底 = 名册会话 hasActiveRun 30s 轮询，仅铃铛打开时。若 sessions.changed 漏发且铃铛关闭，用户完全收不到完成信号，直到开铃铛触发轮询。
+- **建议**：页面加载时（不限铃铛打开）做一次 sessions.list 校准名册状态作为"打开即补"一次性兜底；持续轮询仍限铃铛打开时。
+
+### 4. 结论
+技术地基（完成推送）已对照引擎源码全量验证成立，§2 事实准确，红线设计到位，T1 掘取问对了关键且可部分回填。
+
+但**好用性有两处硬缺口**：
+1. **Q1 铃铛挂载位置反了**——指令页本身看不到铃铛，闭环在最关键页面缺位
+2. **Q2 完成沿不区分成败**——失败也显示"已完成"，误导用户去找不存在的产物
+
+Q3/Q4 是闭环的"最后一公里"（离线完成痕迹、探活盲区的诚实边界），Q5/Q6 是低成本优化。建议 Q1/Q2 纳入本阶段必改（影响核心体验），Q3/Q4 视 T1 结论定夺，Q5/Q6 作为实施细节。
+
+### 5. 任务条目修订建议（供开发 agent 改 PHASE4.5-PLAN.md §5）
+
+- **T1（回填）**：T1.2 scopes 已确认（READ_SCOPE，operator.read 足够，无需改握手）→ 降为确认项；T1.1 feasibility 已确认 → 留 sandbox 实抓时序；**T1.3 OFB_KEY 可达性优先掘取**（T3 选型唯一阻塞项）。
+- **T2（修订）**：NotificationBell 挂载点改 `app/layout.tsx`（或双 layout），覆盖 chat 页（Q1）；完成沿触发时对 sessionKey 拉 `chat.history` 取末条 outcome，指令记录三态"进行中/已完成/已出错"（Q2）；重开页面静默角标补离线完成（Q3）；可选加 `storage` 事件跨标签同步（Q5）；页面加载一次性 sessions.list 兜底（Q6）。
+- **T3（修订）**：按 T1.3 结论——OFB_KEY 可外调走 execFile（可自动探测预警平台）；agent-path-only 则只做手动探测 + 显著引导文案，不承诺自动探测，诚实边界入日志（Q4）。
+
+### 6. 验证方式
+- 引擎证据行号已随行（§1 表），可逐条复核
+- Q1/Q2 改动后：sandbox 造失败沿（假 key 快速失败）→ 断言指令记录显示"已出错（红）"而非"已完成"；chat 页可见铃铛
+- 复审改动点：T2 挂载点 + 三态、T3 探活路径选择
+
+### 7. 实施复核（2026-09-17，dev T2–T4 落地后）
+
+开发 R1–R6 改动清单与代码逐条核实，**无虚假映射**：
+
+| 审核项 | 清单声明 | 代码核实 | 判定 |
+|--------|---------|---------|------|
+| Q1 铃铛挂载 | 根布局 `app/layout.tsx` 挂 `<NotificationBell />` | `app/layout.tsx:20`（非 console layout）→ chat 页可见 | ✅ |
+| Q2 完成沿成败区分 | `chat-terminal` 剥离至 `{sessionKey, runId, state}`；三态 | `sessions-events/route.ts:50` 三字段；`:19` TERMINAL_STATES=final/error/aborted | ✅ |
+| Q3 离线完成痕迹 | outcome 持久化；`unread = endedAt > readMap[sk]` | `notifications.ts:7` OUTCOMES_KEY、`:104` isUnread——重开天然产徽标 | ✅ |
+| Q4 探活路径 | 分支 A：execFile check-login.ts + 平台白名单 + 三态 + 自动探测 | `xiaobei-probe.ts:35` execFile、`:62/67/74` 三态；`probe/route.ts:23` 白名单 400；`logins-board.tsx:74` 自动探测预警平台、`:92` 探活结论优先本地 | ✅ |
+| Q5 跨标签同步 | storage 事件监听 | `notification-bell.tsx:129`、`page.tsx:324` | ✅ |
+| Q6 兜底 | 挂载即校准 + 30s 轮询 | `notification-bell.tsx:53` on-mount /api/chat/sessions、`:141` setInterval 30_000 | ✅ |
+
+**T1 掘取补回一处计划与审核均漏的缺口**：`sessions.changed` 仅发订阅连接（`session-change-event.ts:25` getSessionEventSubscriberConnIds，空集 return），需主动 `sessions.subscribe`。dev 已加 `gateway.ts:139 subscribeSessionEvents()`。T1 掘取在此证明了价值。
+
+**红线复核（增量）**：sessions.changed 快照在 BFF 剥离为 5 元数据字段（`gateway.ts:301`）才进 SSE；chat-terminal 仅 3 字段，零消息内容；sessions-events 经 `isValidWebSessionKey` 双路过滤（`:41/:48`），渠道会话不出口；探活只出状态+引擎 reason，零 cookie；execFile 无 shell + 平台白名单；真实 `~/.openclaw` 零接触（HOME 隔离 pong 缓存）。**全绿**。
+
+**未浏览器实测项（dev 已透明声明，非隐藏缺口）**：
+1. 真实"已完成"绿色徽标全链路——sandbox agent 必失败，靠注入 outcome 验渲染层；生产 agent 正常完成走同一终态路径（`chat.final` → chat-terminal state=final）。可接受。
+2. 真双标签 storage 事件——被弹窗拦截，改模拟验证；storage 为浏览器原生机制、监听布线已验。可接受。
+3. Q2 边界：false 沿无终态时兜底按"已完成"——T1 实证终态先于完成沿（正常路径终态先到、以终态为准）。仅当 SSE 断连期间丢终态帧才误报成功，低概率。
+
+**结论：可继续推进 ✅。** Phase 4.5 闭环达成——长程任务完成推送（成败可辨）+ 登录态服务端探活（盲区收口、诚实边界到位）。Phase 4 遗留断链 P1（发起→观测）至此真正闭环（直达链接 + 完成铃铛 + 成败状态）；登录态从"只监控"进到"监控+探活+重登联动"。单租户形态稳定，SaaS 可在其上动 auth/数据层。

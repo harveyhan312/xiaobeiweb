@@ -3,6 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "@/lib/client/api";
+import {
+  outcomeLabel,
+  OUTCOMES_EVENT,
+  OUTCOMES_KEY,
+  readOutcomes,
+  writeOutcome,
+  type OutcomeMap,
+} from "@/lib/client/notifications";
 
 type ChatMsg = {
   id: string;
@@ -137,10 +145,12 @@ export default function ChatPage() {
   const [commandBusy, setCommandBusy] = useState(false);
   const [commandError, setCommandError] = useState<string | null>(null);
   const [sentReceipt, setSentReceipt] = useState<{ label: string; observationPage: string | null } | null>(null);
+  const [outcomes, setOutcomes] = useState<OutcomeMap>({});
 
   const sourceRef = useRef<EventSource | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const messagesBySession = useRef<Map<string, ChatMsg[]>>(new Map());
+  const sessionKeyRef = useRef<string>("");
 
   const refreshSessions = useCallback(() => {
     apiFetch("/api/chat/sessions")
@@ -192,6 +202,19 @@ export default function ChatPage() {
     });
     if (payload.state !== "delta") {
       setActiveRunId((cur) => (cur === payload.runId ? null : cur));
+      // Q2 三态：本页亲眼看到的终态直接持久化（指令会话才有 outcome）
+      const key = sessionKeyRef.current;
+      if (key && agentOf(key)) {
+        const outcomeState: "final" | "error" | "aborted" =
+          payload.state === "final" ? "final" : payload.state === "error" ? "error" : "aborted";
+        setOutcomes(
+          writeOutcome(key, {
+            state: outcomeState,
+            endedAt: Date.now(),
+            runId: payload.runId,
+          }),
+        );
+      }
     }
   }, []);
 
@@ -236,6 +259,7 @@ export default function ChatPage() {
     (key: string, cached?: ChatMsg[]) => {
       messagesBySession.current.set(sessionKey, messages);
       setSessionKey(key);
+      sessionKeyRef.current = key;
       window.localStorage.setItem(SESSION_STORAGE_KEY, key);
       const cachedMsgs = cached ?? messagesBySession.current.get(key) ?? null;
       setMessages(cachedMsgs ?? []);
@@ -268,6 +292,7 @@ export default function ChatPage() {
     }
     if (urlSession) window.localStorage.setItem(SESSION_STORAGE_KEY, urlSession);
     const activeKey: string = key;
+    sessionKeyRef.current = activeKey;
     setSessionKey(activeKey);
     bindStream(activeKey);
     void loadHistory(activeKey).then((hist) => {
@@ -287,6 +312,21 @@ export default function ChatPage() {
       el.scrollTop = el.scrollHeight;
     }
   }, [messages]);
+
+  // 指令 outcome 三态与铃铛共享 localStorage；跨标签页经 storage 事件同步（Q5）
+  useEffect(() => {
+    setOutcomes(readOutcomes());
+    const onOutcomesEvent = () => setOutcomes(readOutcomes());
+    window.addEventListener(OUTCOMES_EVENT, onOutcomesEvent);
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === OUTCOMES_KEY) setOutcomes(readOutcomes());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(OUTCOMES_EVENT, onOutcomesEvent);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
 
   const openCommandPanel = useCallback(() => {
     setPanelOpen(true);
@@ -480,6 +520,7 @@ export default function ChatPage() {
   const newChat = useCallback(() => {
     const key = newSessionKey();
     window.localStorage.setItem(SESSION_STORAGE_KEY, key);
+    sessionKeyRef.current = key;
     setMessages([]);
     setActiveRunId(null);
     setSessionKey(key);
@@ -581,12 +622,28 @@ export default function ChatPage() {
                 还没有委托过指令。点上方「快捷指令」发起。
               </p>
             ) : (
-              commandHistory.map((h) => (
+              commandHistory.map((h) => {
+                const outcome = outcomes[h.sessionKey];
+                const runningNow = isSameSession(h.sessionKey, sessionKey) && activeRunId;
+                const statusText = runningNow
+                  ? "进行中"
+                  : outcome
+                    ? outcomeLabel(outcome.state)
+                    : null;
+                const statusCls = runningNow
+                  ? "text-green-600 dark:text-green-400"
+                  : outcome && outcome.state !== "final"
+                    ? "text-red-600 dark:text-red-400"
+                    : "text-green-600 dark:text-green-400";
+                return (
                 <div key={h.id} className="mb-1 rounded-md px-2 py-2 text-xs hover:bg-neutral-100 dark:hover:bg-neutral-900">
                   <div className="flex items-center justify-between gap-1">
                     <span className="truncate font-medium">{h.label}</span>
                     <span className="shrink-0 text-neutral-400">{formatUpdatedAt(h.time)}</span>
                   </div>
+                  {statusText && (
+                    <div className={`mt-0.5 ${statusCls}`}>{statusText}</div>
+                  )}
                   <div className="mt-1 flex gap-2">
                     <button
                       onClick={() => switchSession(h.sessionKey)}
@@ -601,7 +658,8 @@ export default function ChatPage() {
                     )}
                   </div>
                 </div>
-              ))
+                );
+              })
             ))}
         </div>
         <a

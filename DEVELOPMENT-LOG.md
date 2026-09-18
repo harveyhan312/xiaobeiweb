@@ -577,3 +577,67 @@ Deviation 共 3 处，均已记录：写回统一走 gateway config.patch RPC（
 **未浏览器实测项**：disabled-agent 门控的置灰分支（sandbox 三 agent 全启用；代码路径 `enabledAgents.includes` 已覆盖，留生产启用/停用切换时目检）。
 
 **红线复核**：模板仍零进前端（GET /api/chat/commands 仅元数据）；cookie 值零回显（回归快照仅 cookieNames）；targetAgentId 白名单服务端校验未动；/logins 页新增组件不触碰 cookie 内容。
+
+## 2026-09-16 · Phase 4.5 T1：sessions.changed 实抓 + OFB_KEY 可达性掘取
+
+**实抓方法**：sandbox gateway :18795（/tmp/xb-p3d-sandbox，假令牌/假 AWK_API_KEY），探针 `/tmp/xb-p3d-sandbox/t45-probe.mjs` WS 直连：握手 → `sessions.subscribe` → chat.send（agent:content-producer:web:<uuid>）→ 记录全部事件帧至 run 结束。
+
+**实抓结论（证据为本节探针输出）**：
+
+| # | 结论 | 证据 |
+|---|------|------|
+| 1 | **不订阅收不到**：`sessions.changed` 仅发给订阅连接（`session-change-event.ts:25` `getSessionEventSubscriberConnIds`，空集直接 return）；订阅方法 `sessions.subscribe`（`server-methods/sessions.ts:906`），scope=operator.read（`methods/core-descriptors.ts:156`）——BFF 现有 scopes 无需改握手 | 未订阅轮：0 帧；订阅轮：5 帧 |
+| 2 | 事件名 `sessions.changed`；载荷=完整 session 快照（30+ 字段），顶层可用元数据 `sessionKey/agentId/hasActiveRun/activeRunIds/ts/phase/runId/status`；`reason` 实抓为 undefined | 订阅轮帧 keys |
+| 3 | **完成沿可靠**：run 结束后必有 `hasActiveRun=false` 广播（附加 `endedAt/runtimeMs`），本例唯一 | t=17629 帧 |
+| 4 | **chat 终态先于完成沿**：`chat`(state=error, 带 runId) t=17620 → false 沿 t=17629。outcome 在完成沿时已可用（Q2 实现顺序友好）；同一 runId 观察到两条 error 帧（本地回显 + 远端终态），需按 (sessionKey,runId) 去重 | 时间线 |
+| 5 | 无订阅时同一 run 全程零 sessions.changed——审核员 §六.1 "时序仍需 sandbox 实抓确认"已闭合 | 两轮对比 |
+| 6 | 探针坑（非产品问题）：`client.id` 必须在引擎允许名单（`gateway-client` 可用），自取名 → INVALID_REQUEST | 首轮报错帧 |
+
+**OFB_KEY 可达性（T3 选型）**：
+
+- 探活核心 = `crews/main/skills/_shared/check-session.ts`（Tier1 字段 + Tier2 pong，pong 带 10min TTL 缓存批量防风控）；CLI 薄包装 = `crews/main/skills/published-track/scripts/check-login.ts`（`node --experimental-strip-types`，JSON stdout，exit 0=有效 / 2=SESSION_EXPIRED / 1=参数错或 SIGN_UNAVAILABLE）——**BFF execFile 可直调（分支 A 成立）**，argv 固定无 shell 注入面。
+- **本机 OFB_KEY 未配置**：gateway daemon env（`~/.openclaw/service-env/ai.openclaw.gateway.env` 18 行变量名清单无 OFB_KEY）、openclaw.json 无 env 注入、awada/.env 无。签名平台（xhs/douyin）pong 将返回 `SIGN_UNAVAILABLE`（exit 1，引擎语义="重登救不了，应配凭证"）；bilibili/kuaishou pong 无需签名、探活完整可用。
+- **T3 落地形态（分支 A + 诚实边界）**：/api/logins/probe execFile 该 CLI（平台名白名单校验）；探测结果三态=服务端有效 / 服务端已失效（SESSION_EXPIRED→第六状态+重登联动）/ 探测不可用（SIGN_UNAVAILABLE→提示"需 OFB_KEY 凭证，交 IT engineer 配置"，不误判为失效）。预警平台进入 /logins 页时自动探测一次（TTL 缓存在脚本内，重复探测不放大请求量）；xhs-publish（创作者域，走 creator-session.ts 自管）不在本路由范围。
+- 安全注：execFile 子进程环境继承 BFF env（无 OFB_KEY 也不注入）；探活写 `~/.cache/wiseflow-check-login` TTL 缓存（引擎自带防风控设计），非 openclaw 状态写入，红线不破。
+
+## 2026-09-16 · Phase 4.5 T2–T4：完成推送 + 登录态探活（实施与验证，Q1–Q6 修订全落地）
+
+**T2 完成推送（Q1/Q2/Q3/Q5/Q6）**：
+
+- `lib/gateway.ts`：新增 `SessionChangeEvent` 类型 + `onSessionChange()` 订阅 + `subscribeSessionEvents()`（连接级 `sessions.subscribe`，幂等）；事件分发剥离引擎 30+ 字段快照，仅保留 `sessionKey/agentId/hasActiveRun/activeRunIds/ts` 元数据。
+- `app/api/chat/sessions-events/route.ts`（新）：SSE 双流——`session` 事件（sessions.changed 元数据，经 `isValidWebSessionKey` 白名单过滤）+ `chat-terminal` 事件（chat 终态剥离至 `{sessionKey, runId, state}` 三字段，Q2 红线对齐：不碰消息内容）；`gateway` 事件转发连接态；15s 心跳；断连清理。checkApiAuth 401 矩阵一致。
+- `lib/client/notifications.ts`（新）：outcome 持久层（`xiaobei-web:command-outcomes`，按 endedAt 上限 200 去重裁剪）+ 已读层（`xiaobei-web:notif-read` 时间戳比对）+ roster 读层 + 跨组件 `OUTCOMES_EVENT` 通知。Q3 关键设计：unread = `outcome.endedAt > readMap[sessionKey] ?? 0`——离线完成天然在重开时产生徽标，无需额外"挂载时刻"机制。
+- `app/notification-bell.tsx`（新）：根布局挂载页内铃铛（Q1：聊天页不在 (console) 组）；SSE 实时流 + 挂载时 `/api/chat/sessions` 校准进行中会话（Q6）+ 铃铛展开时 30s 轮询兜底（Q6）；false 沿无终态时兜底按已完成（T1 实证：终态先于完成沿，正常路径终态先到、以终态为准）；下拉条目仅会话级元数据（label/时间/状态/入口链接），零消息内容。
+- `app/layout.tsx`：根布局渲染 `<NotificationBell />`。
+- `app/page.tsx`：聊天页亲眼所见终态直写 outcome（三态窄化 final/error/aborted）；`outcomes` state 经 OUTCOMES_EVENT + storage 事件双通道同步（Q5）。
+
+**T3 探活（Q4 分支 A）**：
+
+- `lib/probe-shared.ts`（新，客户端安全常量/类型）+ `lib/xiaobei-probe.ts`（execFile `check-login.ts`，`process.execPath --experimental-strip-types`，30s 超时，argv 固定无 shell；平台白名单 douyin/bilibili/kuaishou/xhs-browse，xhs-publish 不在引擎探活模块、wx_mp 仅 presence 与本地同源故均不入白名单）；映射 exit/JSON → 三态（valid / server-expired / probe-unavailable）。
+- `app/api/logins/probe/route.ts`（新）：checkApiAuth；platform 白名单外 400；请求体非法 400。
+- `/logins` 重构：`login-meta.ts`（共用元数据，server/client 双用）+ `logins-board.tsx`（客户端卡片面板：挂载时自动探测 expired/expiring 预警平台、手动探测按钮、第六状态"服务端已失效"（探活结论优先于本地判定）+ ReloginAction 联动、探测不可用呈现 OFB_KEY 提示文案）。页面头部文案同步更新。
+
+**实现踩坑（记录防复发）**：
+
+1. 客户端组件 import 服务端 lib（含 `node:child_process`/`node:fs`）→ webpack "Unhandled scheme" 500。解法：客户端安全常量拆至 `probe-shared.ts`；`formatMs` 在 board 内本地复刻（xiaobei-data 含 node:fs）。教训：客户端 import 面必须审查到 lib 的传递依赖。
+2. `Route.tsx` 文件不可 export 非路由符号（Next 约束），类型/常量一律放 lib。
+
+**T4 回归矩阵（sandbox：gateway :18795 + dev :3005，HOME=/tmp/xb-p4-home 隔离 pong 缓存；实测记录）**：
+
+| # | 项 | 结果 |
+|---|-----|------|
+| 1 | CLI 直调四平台：bilibili=SESSION_EXPIRED（真实 pong：nav code=-101）/ kuaishou=SESSION_EXPIRED（missing keys）/ xhs-browse=SESSION_EXPIRED（missing web_session）/ douyin=SIGN_UNAVAILABLE（OFB_KEY 文案） | ✅ 与 T1.3 预判完全一致 |
+| 2 | probe 路由：无 token=401 / bilibili=server-expired / douyin=probe-unavailable / xhs-publish=400 白名单 / 非 JSON=400 | ✅ |
+| 3 | pong 缓存隔离：真实 `~/.cache/wiseflow-check-login` 未产生（HOME 指向 /tmp/xb-p4-home） | ✅ |
+| 4 | /logins UI：B 站/快手卡片自动探测→红色"服务端已失效"+原因+委托重新登录；抖音（本地有效）手动探测→"探测不可用"+OFB_KEY 提示；xhs-publish/公众号无探测入口 | ✅ |
+| 5 | Q1：铃铛出现在聊天页（根布局），徽标 aria-label "任务通知（N 条未读）" | ✅ |
+| 6 | Q2 失败沿断言：指令发送 → sandbox agent 快速失败 → 指令记录红色"已出错"（非"已完成"）+ 铃铛下拉"讲解动画 已出错"（含进入会话/去/videos查看） | ✅ |
+| 7 | Q2 三态渲染：注入 final outcome → 指令记录绿色"已完成" | ✅ |
+| 8 | Q3 离线补送：清空已读标记 → 重载 → 徽标=1（outcome 持久化生效）；全部已读 → 0 | ✅ |
+| 9 | Q5 跨标签同步：模拟另一标签页写 notif-read + storage 事件 → 徽标 1→0 无需刷新 | ✅（真双标签被弹窗拦截，storage 事件为浏览器原生机制，监听布线已验证） |
+| 10 | 渠道会话负例：`chat/send` sessionKey=wechat:* → 400 invalid sessionKey；sessions-events 白名单过滤同函数（lib 级复用） | ✅ |
+| 11 | `npx tsc --noEmit` + `npx eslint .` 全绿 | ✅ |
+
+**红线复核（Phase 4.5 增量）**：铃铛/指令记录仅会话级元数据，chat-terminal 剥离至 {sessionKey, runId, state} 三字段；探活只出状态与引擎侧错误文案（OFB_KEY 提示为引擎 reason 原文），零 cookie 内容；sessions.changed 快照在 BFF 剥离后才进 SSE；execFile 无 shell + 平台白名单；未触碰 openclaw.json 与真实 ~/.openclaw（sandbox 夹具树 + HOME 隔离）。
+
+**未浏览器实测项**：真实"已完成"绿色徽标推送全链路（sandbox agent 必失败，注入 outcome 验证渲染层；生产环境 agent 正常完成后走同一终态路径）；另一标签页的真实 storage 事件（浏览器原生保证，监听布线已模拟验证）。

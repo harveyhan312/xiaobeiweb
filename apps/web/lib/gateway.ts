@@ -41,6 +41,16 @@ export type GatewayErrorShape = {
 
 export type ConnState = "connecting" | "ready" | "closed";
 
+// sessions.changed 只取会话级元数据——引擎载荷是 30+ 字段的完整 session 快照，
+// 绝不能原样透传到浏览器（红线：通知不带消息内容/会话内部状态）
+export type SessionChangeEvent = {
+  sessionKey: string;
+  agentId?: string;
+  hasActiveRun: boolean;
+  activeRunIds: string[];
+  ts: number;
+};
+
 type PendingEntry = {
   resolve: (payload: unknown) => void;
   reject: (err: GatewayRequestError) => void;
@@ -94,6 +104,7 @@ export class GatewayConnection {
   private pending = new Map<string, PendingEntry>();
   private chatListeners = new Set<(payload: ChatEventPayload) => void>();
   private stateListeners = new Set<(state: ConnState) => void>();
+  private sessionChangeListeners = new Set<(payload: SessionChangeEvent) => void>();
   private connectPromise: Promise<void> | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private backoffMs = 1000;
@@ -116,6 +127,17 @@ export class GatewayConnection {
       listener("ready");
     }
     return () => this.stateListeners.delete(listener);
+  }
+
+  onSessionChange(listener: (payload: SessionChangeEvent) => void): () => void {
+    this.sessionChangeListeners.add(listener);
+    return () => this.sessionChangeListeners.delete(listener);
+  }
+
+  // sessions.changed 需显式订阅（引擎 getSessionEventSubscriberConnIds 空集即静默）。
+  // 幂等；重连后由调用方重新调用
+  async subscribeSessionEvents(): Promise<void> {
+    await this.request("sessions.subscribe", {});
   }
 
   private setState(next: ConnState) {
@@ -272,6 +294,28 @@ export class GatewayConnection {
               // listener 异常不影响其他订阅者
             }
           }
+          return;
+        }
+        if (frame.type === "event" && frame.event === "sessions.changed") {
+          const p = frame.payload as
+            | { sessionKey?: string; agentId?: string; hasActiveRun?: boolean; activeRunIds?: unknown; ts?: number }
+            | undefined;
+          if (!p?.sessionKey) return;
+          const event: SessionChangeEvent = {
+            sessionKey: p.sessionKey,
+            agentId: p.agentId,
+            hasActiveRun: p.hasActiveRun === true,
+            activeRunIds: Array.isArray(p.activeRunIds) ? (p.activeRunIds as string[]) : [],
+            ts: typeof p.ts === "number" ? p.ts : Date.now(),
+          };
+          for (const listener of this.sessionChangeListeners) {
+            try {
+              listener(event);
+            } catch {
+              // listener 异常不影响其他订阅者
+            }
+          }
+          return;
         }
       });
 
