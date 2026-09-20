@@ -19,8 +19,9 @@ jobs:
           - { os: macos-14, plat: mac-arm64 }
           - { os: macos-13, plat: mac-x64 }
           - { os: ubuntu-latest, plat: linux-x64 }
-          - { os: windows-latest, plat: win-x64 }
+          - { os: windows-latest, plat: win-x64, experimental: true }
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental || false }}
     defaults:
       run:
         working-directory: apps/web
@@ -48,7 +49,8 @@ jobs:
         run: |
           cp -R .next/static .next/standalone/.next/static
           cp -R public .next/standalone/public
-          (cd .next/standalone && tar -czf "$GITHUB_WORKSPACE/xiaobei-web-${{ matrix.plat }}.tar.gz" .)
+          # 相对路径输出（4 级上跳到仓库根）；Windows GNU tar 会把 "D:" 解析为远程主机，禁用盘符路径
+          (cd .next/standalone && tar -czf "../../../../xiaobei-web-${{ matrix.plat }}.tar.gz" .)
 
       - name: SHA256
         run: |
