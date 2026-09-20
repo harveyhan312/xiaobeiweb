@@ -18,7 +18,7 @@ ENV_FILE="$CONFIG_DIR/env.local"
 DEFAULT_PORT=3000
 # 主仓 GitHub（harveyhan312/xiaobeiweb），Gitee 镜像同路径；可用环境变量覆盖
 BASE_GH="${XB_WEB_RELEASE_BASE:-https://github.com/harveyhan312/xiaobeiweb/releases/latest/download}"
-BASE_GITEE="${XB_WEB_RELEASE_BASE_GITEE:-https://gitee.com/harveyhan312/xiaobeiweb/releases/download/v0.2.0}"
+BASE_GITEE="${XB_WEB_RELEASE_BASE_GITEE:-https://gitee.com/harvey_han312/xiaobeiweb/releases/download/v0.2.0}"
 
 PORT=""
 FILE=""

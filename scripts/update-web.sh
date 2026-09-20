@@ -11,7 +11,7 @@ PROGRAM_DIR="$HOME/xiaobei-web"
 CONFIG_DIR="$HOME/.xiaobei-web"
 ENV_FILE="$CONFIG_DIR/env.local"
 BASE_GH="${XB_WEB_RELEASE_BASE:-https://github.com/harveyhan312/xiaobeiweb/releases/latest/download}"
-BASE_GITEE="${XB_WEB_RELEASE_BASE_GITEE:-https://gitee.com/harveyhan312/xiaobeiweb/releases/download/v0.2.0}"
+BASE_GITEE="${XB_WEB_RELEASE_BASE_GITEE:-https://gitee.com/harvey_han312/xiaobeiweb/releases/download/v0.2.0}"
 
 FILE=""
 MIRROR=0
