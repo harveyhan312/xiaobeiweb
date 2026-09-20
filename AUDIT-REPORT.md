@@ -409,3 +409,119 @@ Q3/Q4 是闭环的"最后一公里"（离线完成痕迹、探活盲区的诚实
 3. Q2 边界：false 沿无终态时兜底按"已完成"——T1 实证终态先于完成沿（正常路径终态先到、以终态为准）。仅当 SSE 断连期间丢终态帧才误报成功，低概率。
 
 **结论：可继续推进 ✅。** Phase 4.5 闭环达成——长程任务完成推送（成败可辨）+ 登录态服务端探活（盲区收口、诚实边界到位）。Phase 4 遗留断链 P1（发起→观测）至此真正闭环（直达链接 + 完成铃铛 + 成败状态）；登录态从"只监控"进到"监控+探活+重登联动"。单租户形态稳定，SaaS 可在其上动 auth/数据层。
+
+---
+
+## 七、Phase 5 计划审核（独立分发：安装/升级/卸载）
+
+> 审核对象：`PHASE5-PLAN.md`（计划文件）。本阶段无新功能，是把 web 从"主理人自用、随仓库手工部署"升级为**独立可分发程序**。审核重点：**安装/首跑体验（分发阶段的"好用"口径）+ §2 技术前提事实性**。
+> 审核员：Claude（第三方）。日期：2026-09-20。
+
+### 1. §2 技术前提核验
+
+| 计划声明 | 代码/部署核实 | 判定 |
+|---------|-------------|------|
+| §2.1 BFF 连 `OPENCLAW_GATEWAY_URL ?? ws://127.0.0.1:18789`，令牌 env → `~/.openclaw/openclaw.json` gateway.auth.token | `lib/gateway.ts:94` URL、`:74-87` resolveGatewayToken | ✅ |
+| §2.2 api-auth 首次缺失自动生成，CSPRNG，写 .env.local | `lib/api-auth.ts:53` `.update(randomUUID())`（randomUUID=CSPRNG）、`:8` ENV_FILE | ✅ |
+| §2.3 launchd 模板"已在运行（**RunAtLoad + KeepAlive**，2026-09-18 加固），可作打包内置模板" | `deploy/ai.xiaobei.web.plist` **无 RunAtLoad/KeepAlive 键**；路径全硬编码开发者本机（node=`/Users/harvey/.local/bin/node`、程序=`…/Qoder/projects/xiaobei-web/apps/web`）；deploy log line 17/78 明确"不设 RunAtLoad/KeepAlive"；文件 mtime 9月15，无 2026-09-18 加固痕迹 | ❌ **事实误述** |
+| §2.4 `serverExternalPackages: ["ws"]` 已处理；standalone 待 T1 | `next.config:6` ws external；`output: standalone` 未设（正确留 T1/T2） | ✅ |
+| §2.5 xiaobei install.sh 参照物 1830 行；portable node | `~/xiaobei/scripts/install.sh` 1830 行 ✅；`~/xiaobei/tools/node` v24.15.0（≥18.18 满足 Next 15.5） | ✅ T1.4 可降为确认 |
+| §2 T1.2 本仓库无 git remote | `git remote -v` 空 | ✅ 诚实 |
+
+**关键发现：§2.3 误述现状。** 计划把 launchd 模板当作"已加固、可直接打包内置"的事实前提，但实际：(a) plist 无 RunAtLoad/KeepAlive（不自启、崩溃不自拉——与 §6.5 验收"重启→自启 RunAtLoad；kill→自拉 KeepAlive"矛盾）；(b) plist 全硬编码开发者路径，非参数化模板。这两项是 **T4 的实打实工作项**，不是已证实的起点。计划把它们误标为"已证实"，会误导任务估时与验收基线。
+
+### 2. §4 红线：到位 ✅
+默认 127.0.0.1、改 0.0.0.0 须显式 + README 风险、令牌 CSPRNG + 0600 + 不入日志、脚本对 ~/.openclaw 零写入、Release SHA256 校验、既有安全结论不变——设计到位，与 Phase 1–4.5 红线延续一致。无回退。
+
+### 3. 功能 / 好用性问题（R1–R6，按影响排序）
+
+#### R1 · [高] §2.3 launchd 现状误述（见上）
+- **现象**：计划称模板已含 RunAtLoad+KeepAlive、可作打包内置；实际 plist 两键均无、路径全硬编码。
+- **建议**：§2.3 改为"launchd 部署已有可参照 plist，但**缺自启/自拉键且路径未参数化**——T4 须补 RunAtLoad/KeepAlive + 按安装位置/解析的 node 生成 ProgramArguments/WorkingDirectory/log 路径"。把此项从"已证实"挪到 T4 工作项，§6.5 验收基线据此设。
+
+#### R2 · [中] 升级"保留 .env.local"未指明机制，.env.local 在被换的程序目录内
+- **现象**：§3.3.5 令牌写 `<root>/.env.local`（程序目录内），§3.3 update "换程序目录（保留 .env.local）"。若 update 整体替换程序目录，.env.local 随之被删——"保留"需要 backup-restore 或外置，计划未说清。
+- **建议**：二选一并写明——(a) .env.local 外置到数据目录（如 `~/.xiaobei-web/env.local`，程序目录纯程序，update 零保留负担）；(b) update 先 `cp .env.local /tmp` 再换再回填。推荐 (a)：与 xiaobei"程序目录 vs 运行数据 `~/.openclaw` 分离"哲学一致，红线更干净。
+
+#### R3 · [中] 端口冲突闭环不完整——XB_WEB_PORT 进不了 daemon
+- **现象**：§3.3.7 "3000 被占 → 报错并提示改 `XB_WEB_PORT`"。但当前 plist `ProgramArguments` 硬编码 `-p 3000`，§3.3.6 只提"路径按实际安装位置生成"，未提端口参数化。用户改了 `XB_WEB_PORT` 环境变量，daemon 仍听 3000。
+- **建议**：T4 生成 plist 时把 `-p` 写成解析后的端口（或 plist 读 `XB_WEB_PORT` env，launchd `EnvironmentVariables` 注入）；install 检测到 3000 被占时，要么提示用户传 `--port` 给 install 脚本、脚本据此生成 plist，要么自动递增并打印最终端口。
+
+#### R4 · [中] 前置检测仅查 openclaw.json，引擎装了未首跑会误报
+- **现象**：§3.3.2 "openclaw.json 存在且含 gateway token → 不存在则报'请先安装引擎'"。但 xiaobei 首跑后才生成 openclaw.json；用户装了引擎未启动 → install-web 误报"未装引擎"。
+- **建议**：检测放宽为"引擎可执行存在（`~/xiaobei/bin/openclaw` 或 PATH 中）**或** openclaw.json 存在"；若仅引擎在跑但 token 字段空，提示"请先启动一次引擎"。
+
+#### R5 · [低] curl|bash 安装器本身无校验
+- **现象**：§1.1 `curl … install-web.sh | bash`，tarball 有 SHA256 校验（§4.4），但安装器脚本本身 curl|bash 无 checksum。标准信任模型（HTTPS），可接受。
+- **建议**：README 分发节注明信任假设（"安装器经 HTTPS 取自官方仓，tarball 有 SHA256 校验；如需逐字节核验，先下载脚本检视再执行"），与 xiaobei install.sh 一致即可。
+
+#### R6 · [低] 首跑引擎未启动时黄点态无"如何启动引擎"指引
+- **现象**：§3.4 "连接失败（引擎未启动）时聊天页已有黄点态，够用，不额外改"。新装用户最可能先开 web 再想起没起引擎——黄点 + 一句"若引擎未运行，终端 `~/xiaobei/bin/openclaw` 或 `launchctl start ai.xiaobei` 启动"能省一次困惑。
+- **建议**：黄点态旁补一行可复制启动命令（不引入新逻辑，仅文案）。
+
+### 4. T1 掘取门控评估：合理 ✅
+T1 四项掘取问对了关键且可部分回填：
+- T1.1 standalone + turbopack + ws + monorepo 路径——**真正的技术风险点**（ws 被 `serverExternalPackages` external 后，standalone 须把其 node_modules 纳入追踪，是 Next standalone 已知坑），T1 必须先行，结论决定 §3.1 选型。合理。
+- T1.2 无 git remote、T3 建仓——已核实（诚实）；唯一外部主理人决策项，提前并行合理。
+- T1.3 平台矩阵——mac 本机、linux CI、win 实验性，分级合理。
+- T1.4 portable node v24.15.0——**已核实满足 Next 15.5**，可降为确认项。
+
+### 5. 结论
+技术前提除 §2.3 launchd 误述外基本属实，红线到位，T1 门控合理。**分发阶段"好用"有三处闭环缺口**：
+1. **R1 launchd 现状误述**——plist 缺自启/自拉键 + 未参数化，是 T4 实打实工作，不是已证实起点
+2. **R2 .env.local 位置**——在程序目录内会被 update 换掉，须外置或备份机制
+3. **R3 端口冲突**——XB_WEB_PORT 进不了硬编码 plist，闭环断在 daemon 侧
+
+R4–R6 为前置检测/首跑指引的细节优化。建议 R1/R2/R3 纳入 T4 必改（影响安装/升级/端口三条核心路径），R4/R5/R6 作实施细节。
+
+### 6. 修订任务条目建议（供开发 agent 改 PHASE5-PLAN.md §5）
+
+- **§2.3（改述）**：从"已证实"挪到 T4——plist 缺 RunAtLoad/KeepAlive + 路径未参数化，T4 补全。
+- **T2（补）**：next.config 加 `output: "standalone"`（T1 结论为准）；令牌文案通用化（`lib/client/api.ts:33` 去 dev 路径，改"令牌在安装时已打印 / 位于 `~/xiaobei-web/.env.local` 的 XB_WEB_TOKEN"）。
+- **T4（修订）**：install-web.sh 生成 plist 时——补 RunAtLoad + KeepAlive（§6.5 验收前置）；ProgramArguments/WorkingDirectory/log 路径按安装位置 + 解析的 node 生成（R1）；端口参数化（检测 3000 被占 → 传 `--port`/自动递增 → 写入 plist `-p`，R3）；.env.local 外置到 `~/.xiaobei-web/env.local`（程序目录纯程序，update 零保留，R2）；前置检测放宽"引擎可执行或 openclaw.json"（R4）。
+- **T1（回填）**：T1.4 portable node v24.15.0 已满足，降为确认项；T1.1–T1.3 不变。
+
+### 7. 验证方式
+- §2 表引擎/代码行号已随行，可逐条复核（尤其 R1：直接读 `deploy/ai.xiaobei.web.plist` 确认无 RunAtLoad/KeepAlive + 硬编码路径）
+- R1/R2/R3 改动后：T5 干净目录模拟安装 → 断言 plist 含 RunAtLoad+KeepAlive 且路径为安装位置；升级 → .env.local 保留；3000 占用 → install 提示/自动换端口且 daemon 听该端口
+- 复审改动点：T4 plist 生成 + .env.local 外置 + 端口参数化
+
+### 8. 实施复核（2026-09-20，dev T1–T5 落地后）
+
+开发改动清单与代码逐条核实，**R1–R6 全落地**，另捕捉两处计划与审核均漏的缺口：
+
+| 审核项 | 清单声明 | 代码核实 | 判定 |
+|--------|---------|---------|------|
+| R1 plist 自启/自拉 | 生成 plist 含 RunAtLoad+KeepAlive + 路径参数化 | `install-web.sh:196-198` 两键齐；`:189/194` ProgramArguments/WorkingDirectory 按安装位置生成 | ✅ |
+| R2 .env.local 外置 | `~/.xiaobei-web/env.local`（0600），升级零保留 | `:16-17` CONFIG_DIR/ENV_FILE；`:160` chmod 600；`:136` "保留既有令牌"幂等；`update-web.sh:3` "程序目录外，零保留负担" | ✅ |
+| R3 端口 | `--port`/自动递增，plist 读它 | `:28` --port；`:141-145` 3000 起找空闲；`:158` 写 XB_WEB_PORT；wrapper `:171` 读 | ✅ |
+| R4 前置检测 | 放宽：可执行 或 openclaw.json | `:53` `~/xiaobei/bin/openclaw` -x 检测；缺则报"先安装并启动一次" | ✅ |
+| R5 SHA256 校验 | Release 附 SHA256，下载后校验 | `:86-107` 下载 .sha256 + sha256sum/shasum 校验 | ⚠️ **见下 S1** |
+| R6 黄点指引 | 引擎未启动琥珀提示块 + 可复制启动命令 | `app/page.tsx:564-570` amber 块 + `launchctl start ai.openclaw.gateway` / `~/xiaobei/bin/openclaw` | ✅ |
+
+**dev 捕捉的两处漏网（计划与审核均未覆盖）**：
+1. **[安全·关键] standalone `server.js` 的 `HOSTNAME` 缺省 `0.0.0.0`**——会直接违反 §4.1 红线"默认 127.0.0.1"。dev 经 T2 实测发现 `server.js` 不吃 `-p/-H`、读 `PORT`/`HOSTNAME` env 且 HOSTNAME 默认 0.0.0.0，遂在生成的 wrapper（`install-web.sh:172`）**硬编码 `export HOSTNAME=127.0.0.1`**（非 `${VAR:-127.0.0.1}`，不可被环境变量意外覆盖）。这是本阶段最值得记的安全拦截——T5 矩阵 #3 "监听 127.0.0.1（非 0.0.0.0）"由它保证。
+2. `XB_WEB_LABEL` 覆盖 launchd label——设计期即防"测试 bootout 误伤生产同名服务"。设计嗅觉好。
+
+### 9. 复核新发现（实施后浮出，1 条）
+
+#### S1 · [中] SHA256 校验在 sidecar 缺失时静默跳过，弱化 §4.4 红线
+- **位置**：`scripts/install-web.sh:100-109`
+- **现象**：`if curl … .sha256 2>/dev/null; then …校验… else say "⚠ 发布物未附 .sha256，跳过校验"`。.sha256 下载失败（404/网络/镜像缺文件）时，**不 die、只 warn，继续解压安装**。
+- **风险**：§4.4 红线意图是"下载后校验"作为篡改闸门。当前实现把校验降级为"sidecar 在才校验"。威胁模型：`--mirror` 指向的镜像线若被投毒或投毒者能剥离 .sha256 sidecar，可投递篡改 tarball 且无校验即安装 → 以用户身份执行任意 node 代码（daemon 常驻）。HTTPS 防不住 release 仓本身被攻破或镜像被替换。
+- **建议**：远程下载路径（非 `--file`）下，.sha256 下载失败应 `die "校验文件不可达，拒绝安装（可用 --file 指定已校验的本地产物）"`，把校验从可选提为强制。`--file` 本地路径免校验可保留（用户自构自负责）。一行改：`else` 分支由 `say ⚠` 改 `die`。
+
+### 10. 红线复核（Phase 5 增量）：除 S1 外全绿
+- 安装/升级/卸载零写 `~/.openclaw`（只读 openclaw.json gateway.auth.token 做检测）：`install-web.sh:51` 只读、`update-web.sh:6` + `uninstall-web.sh:3` 显式红线声明 ✅
+- 令牌 0600 外置 ✅；服务默认 127.0.0.1（wrapper 硬注入 HOSTNAME，堵住 standalone 默认 0.0.0.0）✅
+- 升级备份+回滚（`update-web.sh:91-98` 产物不完整即回滚）✅
+- 卸载交互确认 + `--purge-config` 二次确认 ✅
+
+### 11. 结论
+Phase 5 实施质量高：R1–R6 全落地，且 dev 主动捕捉了 standalone `HOSTNAME=0.0.0.0` 这一**会直接破红线**的安全隐患（计划与审核均漏）并以硬编码方式堵死——T1 掘取再次证明了价值。
+
+**唯一残余**：S1（SHA256 sidecar 缺失静默跳过）弱化 §4.4 红线。建议 dev 把远程下载路径的校验从可选提为强制（`else` 分支 `say`→`die`，一行改），随后即可视为 Phase 5 收尾。
+
+**未实测项（dev 透明声明，非隐藏缺口）**：linux-x64 产物 CI 验证同批待 T3 建仓；T3 远端仓库/CI/首个 release 仍待主理人决策（脚本中 `<release-base>` 占位待回填）——属外部依赖，不阻塞本仓代码审核。
+
+**可继续推进 ✅**（S1 建议修后收尾）。单租户形态至此具备独立分发能力：装好 xiaobei 的机器一条命令即获本机控制台，与引擎解耦（唯一耦合面 = gateway WS 地址+令牌），SaaS 可在稳定单租户形态上动。

@@ -641,3 +641,69 @@ Deviation 共 3 处，均已记录：写回统一走 gateway config.patch RPC（
 **红线复核（Phase 4.5 增量）**：铃铛/指令记录仅会话级元数据，chat-terminal 剥离至 {sessionKey, runId, state} 三字段；探活只出状态与引擎侧错误文案（OFB_KEY 提示为引擎 reason 原文），零 cookie 内容；sessions.changed 快照在 BFF 剥离后才进 SSE；execFile 无 shell + 平台白名单；未触碰 openclaw.json 与真实 ~/.openclaw（sandbox 夹具树 + HOME 隔离）。
 
 **未浏览器实测项**：真实"已完成"绿色徽标推送全链路（sandbox agent 必失败，注入 outcome 验证渲染层；生产环境 agent 正常完成后走同一终态路径）；另一标签页的真实 storage 事件（浏览器原生保证，监听布线已模拟验证）。
+
+## 2026-09-20 · Phase 5 T1：standalone 构建掘取（turbopack / ws / monorepo 三点）
+
+背景：Phase 5 计划（PHASE5-PLAN.md，审核 §七 R1–R6 已采纳）定 web 独立分发。T1 目的是用实测定死 §3.1 构建形态选型。
+
+**方法**：next.config.ts 临时加 `output: "standalone"`（保留 `serverExternalPackages: ["ws"]`），`npx next build`（turbopack），检查产物布局与依赖追踪，独立端口起服冒烟，再回填计划。
+
+**实测结论（mac-arm64，Next 15.5.25）**：
+
+| # | 掘取点 | 结果 |
+|---|--------|------|
+| 1 | standalone × turbopack 兼容 | ✅ 构建一次通过 |
+| 2 | monorepo 路径嵌套 | ✅ 无嵌套：`server.js` 直接在 `.next/standalone/` 根（非 `.next/standalone/apps/web/`），分发结构简单 |
+| 3 | `serverExternalPackages: ["ws"]` × standalone | ✅ `ws` 被 trace 进 `standalone/node_modules`（探活 API 实测通） |
+| 4 | 其余依赖（react-markdown 等） | ✅ 内联进 server bundle（calibration 页 200 验证），不依赖 standalone/node_modules |
+| 5 | 体积 / 启动 | standalone 67M + static 1M；`node server.js` Ready 114ms |
+| 6 | 冒烟 | 首页 200 / `/api/logins` 返回登录态元数据 / `/api/logins/probe`（bilibili→valid）200 |
+
+**分发包组装要点**（写入 §3.1，T4 脚本依据）：tarball = `standalone/` + `.next/static` 拷入 `standalone/.next/static` + `public/`。
+
+**决策**：§3.1 选型定为 standalone；备选方案（ship 源码 + 用户侧构建）废弃。启动命令对应改为 `node {安装目录}/server.js -H 127.0.0.1 -p {端口}`。
+
+**next.config.ts**：`output: "standalone"` 保留（T2 正式纳入）；本机生产服务（launchd `next start`）随后已重建并验证 200 不受影响。
+
+**未做**：linux-x64 产物 CI 验证（T3 CI 就绪后做，本机无 docker 承诺）；portable node v24.15.0 满足 Next 15.5 已由审核员核实（计划 §8，降为确认项）。
+
+## 2026-09-20 · Phase 5 T2–T5：web 独立分发（standalone 改造 + 三脚本 + 全量回归）
+
+T1 掘取（§3.1 已定稿 standalone）之后同日完成实施。
+
+**T2 web 侧改造**：
+1. `next.config.ts` 正式加 `output: "standalone"`（T1 结论）；
+2. `lib/client/api.ts` 令牌提示通用化：`cat ~/.xiaobei-web/env.local ~/Documents/.../apps/web/.env.local 2>/dev/null`（安装版/开发版一次覆盖），不再只指 dev 路径；
+3. R6 黄点态引擎启动指引：`connState !== "ready"` 时侧栏出现琥珀提示块，含可复制命令 `launchctl start ai.openclaw.gateway` / 前台 `~/xiaobei/bin/openclaw`（label 经本机 launchctl list 核实）。
+
+**T2 期间关键发现（已回填计划 §3.1/§3.3.6）**：standalone `server.js` 不吃 `-p/-H`，读 `PORT`/`HOSTNAME` env，且 **HOSTNAME 缺省 0.0.0.0**——daemon 必须显式注入 `HOSTNAME=127.0.0.1`（安全红线）。解法：安装器生成 `start-web.sh` wrapper（source env.local → export XB_WEB_TOKEN/PORT/HOSTNAME → exec 参数化的 node + server.js），plist ProgramArguments 指向 wrapper。
+
+**T4 三脚本（scripts/）**：
+- `install-web.sh`：平台检测 → 引擎前置检测（R4 放宽：可执行 或 openclaw.json；缺 token 提示先启动引擎）→ Node 解析（portable → 系统 ≥20）→ 下载+SHA256（`--file` 支持本地产物）→ 换装 `~/xiaobei-web` → 令牌外置 `~/.xiaobei-web/env.local`（0600，CSPRNG；已存在则保留，R2）→ 端口 `--port`/自动递增（R3）→ 生成 wrapper → launchd plist 生成（**RunAtLoad+KeepAlive、路径全部按安装位置生成，R1**）/ systemd user unit → 打印 URL+令牌。
+- `update-web.sh`：停→换（备份/回滚）→ 重新生成 wrapper（node 路径可能变）→ 起→15s 健康检查。
+- `uninstall-web.sh`：`--yes`/`--purge-config`；bootout+删 plist / systemctl disable；删程序目录；配置目录默认保留；绝不触碰 ~/.openclaw。
+- 三脚本支持 `XB_WEB_LABEL` 覆盖 launchd label（测试隔离用，避免 bootout 误伤生产同名服务——设计期即发现此坑）。
+
+**T5 回归矩阵（HOME=/tmp/xb-p5-home 沙箱 + XB_WEB_LABEL=ai.xiaobei.web.test + --file 本地 tarball；tarball 由 standalone+static+public 组装，16.9M + .sha256）**：
+
+| # | 项 | 结果 |
+|---|-----|------|
+| 1 | 无引擎安装 → 明确报错、零半装状态 | ✅ |
+| 2 | 引擎装了未首跑（openclaw.json 缺 gateway.auth.token）→ 报"请先启动一次引擎" | ✅ |
+| 3 | 干净目录安装 → 200 / env.local 0600 / API 鉴权通过 / **监听 127.0.0.1**（非 0.0.0.0）/ plist 两键齐全且路径参数化 / wrapper 注入正确 | ✅ |
+| 4 | 中断后重装 → 令牌保留（幂等） | ✅ |
+| 5 | KeepAlive：kill -9 服务进程 → 新 PID 自动拉起 | ✅ |
+| 6 | 端口自动递增：3000 被生产占用 → 自动选 3001 并监听 | ✅ |
+| 7 | 升级：停→换→起→健康检查过，令牌逐字节不变 | ✅ |
+| 8 | 卸载 --yes --purge-config：程序目录/配置目录/plist 零残留、端口释放、真实 ~/.openclaw 原样 | ✅ |
+| 9 | `npx tsc --noEmit` + `npx eslint .` 全绿 | ✅ |
+| 10 | R6 黄点指引浏览器实测：dev 起服指向假 gateway 端口 → 黄点常驻 + 提示块渲染正确（截图 /tmp/xb-p5-t2-engine-hint.png） | ✅ |
+
+**红线复核（Phase 5 增量）**：安装/升级/卸载零写 ~/.openclaw（只读 openclaw.json 的 gateway.auth.token 做检测）；令牌 0600 外置；服务默认 127.0.0.1 绑定（显式 HOSTNAME 注入，standalone 默认 0.0.0.0 已堵）；SHA256 强校验（附 .sha256 时）；卸载交互确认。
+
+**T3 待主理人决策**：建远端仓库（GitHub；atomgit 镜像线是否复刻）→ CI 四平台出包 → 首个 release。脚本/README 中 `<release-base>` 与 `XB_WEB_RELEASE_BASE` 占位待 T3 回填。linux 产物 CI 验证同批。
+
+### Phase 5 补记（2026-09-20 午后）：S1 修复 + 本机安装包
+
+- **S1（审核 §9）**：install-web.sh / update-web.sh 远程下载路径 .sha256 缺失由 warn 改 `die`（校验提为强制闸门）。实测：file:// 模拟缺 sidecar 源 → 拒装、零残留；补 sidecar → 安装成功 200。
+- **本机安装包**：`~/Desktop/xiaobei-web-dist/`（xiaobei-web-mac-arm64.tar.gz 16.9M + .sha256 + 三脚本 + 安装说明.md）。以 bundle 原样在沙箱（HOME=/tmp/xb-p5-final，test3 label）做端到端安装（3107→200）与卸载（零残留）验证，生产 3000 全程无恙。
