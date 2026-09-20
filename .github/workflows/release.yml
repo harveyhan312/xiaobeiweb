@@ -1,0 +1,81 @@
+name: release
+
+# tag push（v*）→ 四平台构建 → GitHub Release 挂产物 + SHA256
+# win-x64 为实验性出包（不承诺质量）
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.plat }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, plat: mac-arm64 }
+          - { os: macos-13, plat: mac-x64 }
+          - { os: ubuntu-latest, plat: linux-x64 }
+          - { os: windows-latest, plat: win-x64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/web
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (standalone)
+        run: pnpm exec next build
+
+      - name: Assemble tarball
+        run: |
+          cp -R .next/static .next/standalone/.next/static
+          cp -R public .next/standalone/public
+          (cd .next/standalone && tar -czf "$GITHUB_WORKSPACE/xiaobei-web-${{ matrix.plat }}.tar.gz" .)
+
+      - name: SHA256
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "xiaobei-web-${{ matrix.plat }}.tar.gz" > "xiaobei-web-${{ matrix.plat }}.tar.gz.sha256"
+          else
+            shasum -a 256 "xiaobei-web-${{ matrix.plat }}.tar.gz" > "xiaobei-web-${{ matrix.plat }}.tar.gz.sha256"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaobei-web-${{ matrix.plat }}
+          path: |
+            xiaobei-web-${{ matrix.plat }}.tar.gz
+            xiaobei-web-${{ matrix.plat }}.tar.gz.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

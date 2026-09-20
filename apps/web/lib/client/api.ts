@@ -30,7 +30,7 @@ export async function apiFetch(input: string, init?: RequestInit): Promise<Respo
     const body = (await res.clone().json().catch(() => null)) as { code?: string } | null;
     if (body?.code === "NEEDS_TOKEN") {
       const entered = window.prompt(
-        "请输入本机 API 访问令牌（终端执行：\ngrep XB_WEB_TOKEN ~/Documents/Qoder/projects/xiaobei-web/apps/web/.env.local\n复制 = 后面的值粘贴到这里）",
+        "请输入本机 API 访问令牌（终端执行：\ncat ~/.xiaobei-web/env.local ~/Documents/Qoder/projects/xiaobei-web/apps/web/.env.local 2>/dev/null\n复制 XB_WEB_TOKEN= 后面的值粘贴到这里；安装版令牌在安装完成时也已打印）",
       );
       if (entered && entered.trim()) {
         storeToken(entered.trim());

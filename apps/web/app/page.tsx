@@ -561,6 +561,15 @@ export default function ChatPage() {
           <span className={`h-2.5 w-2.5 rounded-full ${stateColor}`} aria-hidden />
           <span className="text-sm font-semibold">小贝</span>
         </div>
+        {connState !== "ready" && (
+          <div className="mx-3 mb-2 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 text-[11px] dark:border-amber-900 dark:bg-amber-950">
+            引擎未连接。若 xiaobei 尚未启动，终端执行：
+            <code className="mt-1 block select-all bg-white/70 px-1 py-0.5 font-mono dark:bg-black/30">
+              launchctl start ai.openclaw.gateway
+            </code>
+            <span className="mt-0.5 block">或前台运行 ~/xiaobei/bin/openclaw</span>
+          </div>
+        )}
         <div className="flex gap-2 px-3 pb-2">
           <button
             onClick={newChat}
