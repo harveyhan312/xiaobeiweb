@@ -17,7 +17,7 @@ jobs:
       matrix:
         include:
           - { os: macos-14, plat: mac-arm64 }
-          - { os: macos-13, plat: mac-x64 }
+          - { os: macos-15-intel, plat: mac-x64 }
           - { os: ubuntu-latest, plat: linux-x64 }
           - { os: windows-latest, plat: win-x64, experimental: true }
     runs-on: ${{ matrix.os }}
